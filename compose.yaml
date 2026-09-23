@@ -1,0 +1,18 @@
+# Postgres local para desenvolvimento e testes e2e.
+#   docker compose up -d      (ou: podman compose up -d)
+# Cria dois bancos: "dutrail" (dev) e "dutrail_test" (e2e).
+services:
+  postgres:
+    image: postgres:17-alpine
+    ports:
+      - '5433:5432'
+    environment:
+      POSTGRES_USER: dutrail
+      POSTGRES_PASSWORD: dutrail
+      POSTGRES_DB: dutrail
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+
+volumes:
+  pgdata:

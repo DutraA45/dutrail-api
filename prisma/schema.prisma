@@ -1,0 +1,60 @@
+// Schema do Prisma para o Dutrail.
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  // Novo gerador (Prisma 7+): emite TypeScript puro dentro de src/, que é
+  // compilado junto com o resto da aplicação pelo `nest build`.
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  // A URL fica em prisma7.config.ts (lida de DATABASE_URL), não aqui.
+}
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  // Nulo para contas criadas via OAuth (Google) que nunca definiram senha.
+  passwordHash  String?
+  name          String?
+  avatarUrl     String?
+  // Preenchido quando a conta foi criada pelo Google ou vinculada a ele.
+  googleId      String?  @unique
+  emailVerified Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  refreshTokens      RefreshToken[]
+  oauthExchangeCodes OAuthExchangeCode[]
+}
+
+/// Uma linha por refresh token emitido. Guardamos apenas o SHA-256 do token:
+/// um vazamento do banco não permite forjar sessões.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  // Preenchido no logout ou na rotação. Um token revogado que volta a ser
+  // apresentado indica reuso (roubo) e derruba todas as sessões do usuário.
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+/// Código de uso único gerado no callback do Google. O frontend troca esse
+/// código por um par de tokens em POST /auth/google/exchange, evitando que
+/// tokens trafeguem na URL do redirect.
+model OAuthExchangeCode {
+  id        String    @id @default(uuid())
+  codeHash  String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+}

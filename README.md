@@ -1,124 +1,225 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Dutrail API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Backend do Dutrail (app de atividades ao ar livre, estilo Strava). API REST em
+[NestJS](https://nestjs.com) + [Prisma](https://www.prisma.io) + PostgreSQL
+([Neon](https://neon.tech)), consumida pelo frontend Angular e, futuramente,
+por um app React Native — por isso a API é agnóstica de cliente (tokens no
+body, sem cookies de sessão).
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+Esta etapa cobre **autenticação**: cadastro/login com senha, refresh token com
+rotação, logout, login com Google e uma rota protegida de exemplo.
 
-## Description
+## Stack
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+| Peça             | Escolha                                                  |
+| ---------------- | -------------------------------------------------------- |
+| Runtime          | Node 24, ESM (`"type": "module"`), TypeScript 6          |
+| Framework        | NestJS 12 (Express)                                      |
+| ORM              | Prisma 7 (gerador `prisma-client`, driver adapter `pg`)  |
+| Auth             | Passport (`passport-jwt`, `passport-google-oauth20`)     |
+| Hash de senha    | Argon2id                                                 |
+| Validação        | class-validator / class-transformer                      |
+| Rate limiting    | @nestjs/throttler                                        |
+| Docs             | @nestjs/swagger em `/docs`                               |
+| Testes           | Vitest + Supertest                                       |
 
-## Project setup
+## Estrutura
 
-```bash
-$ npm install
+```
+src/
+├── main.ts                 # bootstrap
+├── app.setup.ts            # pipes globais, CORS, Swagger (reusado nos e2e)
+├── app.module.ts           # ConfigModule, Throttler, filtro global de erros
+├── config/env.validation.ts    # contrato + validação das variáveis de ambiente
+├── prisma/                 # PrismaService (global)
+├── common/
+│   ├── decorators/         # @Public(), @CurrentUser()
+│   ├── filters/            # AllExceptionsFilter (formato único de erro)
+│   └── dto/                # ErrorResponseDto (Swagger)
+├── users/                  # UsersService (dados), GET /me, UserResponseDto
+├── auth/
+│   ├── auth.controller.ts  # rotas /auth/*
+│   ├── auth.service.ts     # casos de uso (signup, login, google, exchange)
+│   ├── token.service.ts    # emissão, rotação e revogação de JWT/refresh
+│   ├── password.service.ts # argon2
+│   ├── strategies/         # JwtStrategy, GoogleStrategy
+│   ├── guards/             # JwtAuthGuard (global), GoogleAuthGuard
+│   └── dto/                # DTOs de entrada/saída com @ApiProperty
+└── generated/prisma/       # client gerado (gitignored; `npm run prisma:generate`)
+prisma/schema.prisma        # User, RefreshToken, OAuthExchangeCode
+test/                       # e2e (banco real + Google mockado)
 ```
 
-## Compile and run the project
+## Rodando localmente
+
+### 1. Pré-requisitos
+
+- Node 24+ e npm
+- Um PostgreSQL. Duas opções:
+  - **Neon** (produção/dev remoto): crie um projeto e copie a connection
+    string (`postgresql://...?sslmode=require`).
+  - **Local via container** (recomendado para dev e obrigatório para os e2e):
+    ```bash
+    docker compose up -d      # ou: podman compose up -d
+    ```
+    Sobe um Postgres 17 em `localhost:5433` com os bancos `dutrail` (dev) e
+    `dutrail_test` (e2e), usuário/senha `dutrail`/`dutrail`.
+
+### 2. Instalar e configurar
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm install                 # também roda `prisma generate` (postinstall)
+cp .env.example .env        # edite os valores
 ```
 
-## Run tests
+Variáveis principais (todas validadas no boot — ver `src/config/env.validation.ts`):
+
+| Variável                                 | Descrição                                                         |
+| ---------------------------------------- | ----------------------------------------------------------------- |
+| `DATABASE_URL`                           | Connection string do Postgres (Neon ou local)                     |
+| `JWT_SECRET` / `JWT_REFRESH_SECRET`      | Segredos **diferentes**, ≥ 32 chars. Gere com o comando abaixo    |
+| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`     | Expirações (`15m`, `7d`)                                          |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                               |
+| `GOOGLE_CALLBACK_URL`                    | `http://localhost:3000/auth/google/callback` em dev               |
+| `FRONTEND_URL`                           | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200` |
+| `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`     | Rate limit global (por IP)                                        |
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+# gerar segredos
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 ```
 
-## Deployment
+### 3. Credenciais do Google OAuth
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+1. Acesse <https://console.cloud.google.com/apis/credentials> e crie (ou
+   selecione) um projeto.
+2. Configure a **OAuth consent screen** (tipo *External*, adicione seu email
+   como test user enquanto o app não for publicado).
+3. **Create credentials → OAuth client ID → Web application**.
+   - *Authorized JavaScript origins*: `http://localhost:4200` (frontend).
+   - *Authorized redirect URIs*: `http://localhost:3000/auth/google/callback`
+     — precisa ser **idêntica** a `GOOGLE_CALLBACK_URL`.
+4. Copie *Client ID* e *Client secret* para o `.env`.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### 4. Migrations e execução
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+npm run prisma:migrate      # `prisma migrate dev`: aplica migrations (cria se o schema mudou)
+npm run start:dev           # http://localhost:3000, docs em http://localhost:3000/docs
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Outros scripts: `prisma:deploy` (aplica migrations sem criar novas — use em
+produção/CI), `prisma:studio` (UI para inspecionar o banco), `build`,
+`start:prod`, `lint`, `format`.
 
-## Observability
+## Endpoints
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+Documentação interativa (Swagger UI) em **`/docs`**; JSON OpenAPI em `/docs-json`.
+Nas rotas protegidas, clique em **Authorize** e cole o `accessToken`.
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+| Método | Rota                    | Auth          | Descrição                                            |
+| ------ | ----------------------- | ------------- | ---------------------------------------------------- |
+| POST   | `/auth/signup`          | —             | Cadastro (email + senha). 201 → tokens + user        |
+| POST   | `/auth/login`           | —             | Login. 200 → tokens + user; 401 genérico             |
+| POST   | `/auth/refresh`         | refresh token | Novo par de tokens; o antigo é invalidado (rotação)  |
+| POST   | `/auth/logout`          | refresh token | Revoga o refresh token. 204                          |
+| GET    | `/auth/google`          | —             | Redireciona para o consentimento do Google           |
+| GET    | `/auth/google/callback` | —             | Retorno do Google → redirect para o frontend com `?code=` |
+| POST   | `/auth/google/exchange` | código        | Troca o código de uso único por tokens               |
+| GET    | `/me`                   | Bearer        | Usuário autenticado (rota protegida de exemplo)      |
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+Formato de erro (todas as rotas, via `AllExceptionsFilter`):
 
-To add it to this project:
+```json
+{ "statusCode": 401, "error": "Unauthorized", "message": "Invalid credentials", "path": "/auth/login", "timestamp": "..." }
+```
+
+`message` é um array em erros de validação (400).
+
+### Fluxo do cliente
+
+1. `signup`/`login` → guarda `accessToken` (memória) e `refreshToken`.
+2. Chama a API com `Authorization: Bearer <accessToken>`.
+3. Ao receber 401, chama `POST /auth/refresh` com o `refreshToken`, **substitui
+   os dois tokens** pelos novos e repete a request.
+4. `POST /auth/logout` com o `refreshToken` ao sair.
+
+Google: abra `GET /auth/google` numa janela do browser. Após o consentimento a
+API redireciona para `FRONTEND_URL/auth/callback?code=...`; o frontend chama
+`POST /auth/google/exchange { code }` (o código vale 60 s, uso único) e recebe
+o mesmo payload do login.
+
+## Testes
 
 ```bash
-$ npm install @nestjs/observe
+npm test                    # unitários (services, filtro, mapeamento Google) — sem banco
+npm run test:e2e            # e2e: precisa do Postgres do compose (banco dutrail_test)
+npm run test:cov            # cobertura dos unitários
 ```
 
-Then follow the [setup guide](https://docs.nestjs.com/observability/overview) - it takes a single import and an app key.
+Os e2e (`test/auth.e2e-spec.ts`) sobem a aplicação completa contra um banco
+real. `test/global-setup.ts` carrega `.env.test` e roda `prisma migrate
+deploy`; cada teste **trunca as tabelas** (por isso há uma trava exigindo que
+`DATABASE_URL` contenha `test`). A `GoogleStrategy` é substituída por
+`test/fakes/fake-google.strategy.ts`, que devolve um perfil configurável sem
+falar com o Google, mas exercita a lógica real de criação/vinculação de conta.
 
-The free plan needs no payment details and covers 300,000 events a month. You can also browse the [live demo](https://www.observe-demo.nestjs.com/dashboard) first - the whole dashboard over a busy service's data, with nothing to install.
+Para usar outro banco nos e2e (ex.: um branch do Neon no CI), exporte
+`DATABASE_URL` antes de rodar — variáveis do ambiente vencem o `.env.test`.
 
-## Resources
+## Decisões de segurança
 
-Check out a few resources that may come in handy when working with NestJS:
+**Access token (15 min) + refresh token (7 dias).** O access token é um JWT
+stateless (`JWT_SECRET`); o guard só verifica assinatura/expiração, sem ir ao
+banco. O refresh token é outro JWT (`JWT_REFRESH_SECRET`, com `jti`) cujo
+**SHA-256** fica na tabela `RefreshToken`. Guardar só o hash significa que um
+vazamento do banco não entrega sessões válidas.
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observe](https://observe.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+**Rotação + detecção de reuso.** Cada `/auth/refresh` revoga o token recebido
+(compare-and-set atômico, então dois requests concorrentes com o mesmo token
+não geram dois pares) e emite outro. Se um token **já rotacionado** for
+reapresentado, assumimos roubo e revogamos todas as sessões do usuário. O
+logout, por outro lado, apaga o token — reenviá-lo dá um 401 simples, sem
+derrubar as outras sessões (um retry do cliente não deve deslogar o celular).
 
-## Support
+**Refresh token no body, não em cookie `httpOnly`.** Trade-off consciente:
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+- Cookie `httpOnly` protege o refresh token contra XSS no browser, mas exige
+  CORS com `credentials`, mitigação de CSRF (SameSite/CSRF token), domínios
+  compatíveis entre API e SPA, e não se aplica ao app React Native.
+- Body é uniforme para web e mobile e mantém a API sem estado de cookie. O
+  custo é que o cliente web precisa guardar o refresh token (memória ou
+  storage), o que o expõe a XSS. Rotação + reuso mitigam o dano: um token
+  roubado só serve até o próximo refresh legítimo.
+- Se o frontend web quiser o cookie, dá para adicionar um modo "web" que envia
+  o refresh token em cookie `httpOnly; SameSite=Lax` sem mudar o resto.
 
-## Stay in touch
+**Callback do Google não coloca tokens na URL.** URLs vazam em histórico,
+logs de proxy e `Referer`. O callback gera um código de uso único (hash no
+banco, 60 s) e o frontend o troca por tokens em `POST /auth/google/exchange`.
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+**Vinculação de conta Google.** Ordem: `googleId` → email → criar. A
+vinculação por email só acontece se o Google afirma `email_verified`; caso
+contrário alguém poderia criar uma conta Google com o email de outra pessoa e
+sequestrar a conta local. Contas criadas via Google ficam com `passwordHash`
+nulo e recebem o mesmo 401 genérico se alguém tentar login por senha.
 
-## License
+**Senhas.** Argon2id (parâmetros OWASP: 19 MiB, t=2, p=1). No login, quando o
+email não existe, ainda verificamos contra um hash "dummy" para a resposta
+demorar o mesmo tempo e não revelar por timing quais emails estão cadastrados.
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+**Outros.** Guard JWT global com opt-out explícito via `@Public()`; algoritmo
+JWT fixado em HS256; `ValidationPipe` com `whitelist` + `forbidNonWhitelisted`;
+rate limit global e mais estrito em `/auth/login` e `/auth/signup` (10/min
+por IP); erros 500 nunca expõem a mensagem original; `UserResponseDto` é um
+mapeamento explícito (whitelist) — campos novos na tabela não vazam por
+acidente.
+
+## Próximos passos sugeridos
+
+- Job para apagar `RefreshToken`/`OAuthExchangeCode` expirados (hoje só acumulam).
+- Verificação de email e reset de senha (exigem envio de email).
+- `POST /auth/google/token` recebendo o `idToken` do Google Sign-In nativo, para
+  o app React Native não depender do fluxo de redirect.
+- `trust proxy` no Express quando a API for para trás de um load balancer
+  (comentado em `src/app.setup.ts`), senão o rate limit vê o IP do proxy.
