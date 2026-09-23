@@ -1,13 +1,22 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsJWT } from 'class-validator';
+import { ApiPropertyOptional } from '@nestjs/swagger';
+import { IsJWT, IsOptional } from 'class-validator';
 
 /**
- * Usado por /auth/refresh e /auth/logout. O refresh token vem no body (e não
- * em cookie httpOnly) para a API servir igualmente web e mobile; ver README
- * para o trade-off.
+ * Corpo de /auth/refresh e /auth/logout.
+ *
+ * O campo é opcional no DTO porque o canal depende do X-Client-Type:
+ * `mobile` manda o token aqui, `web` o manda no cookie httpOnly (e enviá-lo
+ * no corpo é 400). Quem valida "está no canal certo?" é o
+ * RefreshTokenTransport, que tem o tipo de cliente em mãos.
  */
 export class RefreshTokenDto {
-  @ApiProperty({ example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' })
+  @ApiPropertyOptional({
+    description:
+      'Obrigatório quando X-Client-Type é `mobile`. Deve ser omitido quando é `web` ' +
+      '(nesse caso o token é lido do cookie httpOnly).',
+    example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
+  })
+  @IsOptional()
   @IsJWT()
-  refreshToken: string;
+  refreshToken?: string;
 }

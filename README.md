@@ -3,25 +3,29 @@
 Backend do Dutrail (app de atividades ao ar livre, estilo Strava). API REST em
 [NestJS](https://nestjs.com) + [Prisma](https://www.prisma.io) + PostgreSQL
 ([Neon](https://neon.tech)), consumida pelo frontend Angular e, futuramente,
-por um app React Native — por isso a API é agnóstica de cliente (tokens no
-body, sem cookies de sessão).
+por um app React Native — por isso a API é agnóstica de cliente: o mesmo
+endpoint atende os dois, e o header `X-Client-Type` define apenas **por onde** o
+refresh token trafega (cookie httpOnly para web, corpo JSON para mobile).
+
+Contrato completo da API para quem consome o backend: [docs/API-CONTRACT.md](docs/API-CONTRACT.md).
 
 Esta etapa cobre **autenticação**: cadastro/login com senha, refresh token com
 rotação, logout, login com Google e uma rota protegida de exemplo.
 
 ## Stack
 
-| Peça             | Escolha                                                  |
-| ---------------- | -------------------------------------------------------- |
-| Runtime          | Node 24, ESM (`"type": "module"`), TypeScript 6          |
-| Framework        | NestJS 12 (Express)                                      |
-| ORM              | Prisma 7 (gerador `prisma-client`, driver adapter `pg`)  |
-| Auth             | Passport (`passport-jwt`, `passport-google-oauth20`)     |
-| Hash de senha    | Argon2id                                                 |
-| Validação        | class-validator / class-transformer                      |
-| Rate limiting    | @nestjs/throttler                                        |
-| Docs             | @nestjs/swagger em `/docs`                               |
-| Testes           | Vitest + Supertest                                       |
+| Peça          | Escolha                                                 |
+| ------------- | ------------------------------------------------------- |
+| Runtime       | Node 24, ESM (`"type": "module"`), TypeScript 6         |
+| Framework     | NestJS 12 (Express)                                     |
+| ORM           | Prisma 7 (gerador `prisma-client`, driver adapter `pg`) |
+| Auth          | Passport (`passport-jwt`, `passport-google-oauth20`)    |
+| Hash de senha | Argon2id                                                |
+| Validação     | class-validator / class-transformer                     |
+| Rate limiting | @nestjs/throttler                                       |
+| Cookies       | cookie-parser (refresh token do fluxo web)              |
+| Docs          | @nestjs/swagger em `/docs`                              |
+| Testes        | Vitest + Supertest                                      |
 
 ## Estrutura
 
@@ -33,7 +37,7 @@ src/
 ├── config/env.validation.ts    # contrato + validação das variáveis de ambiente
 ├── prisma/                 # PrismaService (global)
 ├── common/
-│   ├── decorators/         # @Public(), @CurrentUser()
+│   ├── decorators/         # @Public(), @CurrentUser(), @ClientType()
 │   ├── filters/            # AllExceptionsFilter (formato único de erro)
 │   └── dto/                # ErrorResponseDto (Swagger)
 ├── users/                  # UsersService (dados), GET /me, UserResponseDto
@@ -42,6 +46,7 @@ src/
 │   ├── auth.service.ts     # casos de uso (signup, login, google, exchange)
 │   ├── token.service.ts    # emissão, rotação e revogação de JWT/refresh
 │   ├── password.service.ts # argon2
+│   ├── refresh-token-transport.service.ts  # cookie (web) vs corpo (mobile)
 │   ├── strategies/         # JwtStrategy, GoogleStrategy
 │   ├── guards/             # JwtAuthGuard (global), GoogleAuthGuard
 │   └── dto/                # DTOs de entrada/saída com @ApiProperty
@@ -74,15 +79,15 @@ cp .env.example .env        # edite os valores
 
 Variáveis principais (todas validadas no boot — ver `src/config/env.validation.ts`):
 
-| Variável                                 | Descrição                                                         |
-| ---------------------------------------- | ----------------------------------------------------------------- |
-| `DATABASE_URL`                           | Connection string do Postgres (Neon ou local)                     |
-| `JWT_SECRET` / `JWT_REFRESH_SECRET`      | Segredos **diferentes**, ≥ 32 chars. Gere com o comando abaixo    |
-| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`     | Expirações (`15m`, `7d`)                                          |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                               |
-| `GOOGLE_CALLBACK_URL`                    | `http://localhost:3000/auth/google/callback` em dev               |
-| `FRONTEND_URL`                           | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200` |
-| `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`     | Rate limit global (por IP)                                        |
+| Variável                                    | Descrição                                                                   |
+| ------------------------------------------- | --------------------------------------------------------------------------- |
+| `DATABASE_URL`                              | Connection string do Postgres (Neon ou local)                               |
+| `JWT_SECRET` / `JWT_REFRESH_SECRET`         | Segredos **diferentes**, ≥ 32 chars. Gere com o comando abaixo              |
+| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`        | Expirações (`15m`, `7d`)                                                    |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                                            |
+| `GOOGLE_CALLBACK_URL`                       | `http://localhost:3000/auth/google/callback` em dev                         |
+| `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200` |
+| `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                  |
 
 ```bash
 # gerar segredos
@@ -93,13 +98,13 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 
 1. Acesse <https://console.cloud.google.com/apis/credentials> e crie (ou
    selecione) um projeto.
-2. Configure a **OAuth consent screen** (tipo *External*, adicione seu email
+2. Configure a **OAuth consent screen** (tipo _External_, adicione seu email
    como test user enquanto o app não for publicado).
 3. **Create credentials → OAuth client ID → Web application**.
-   - *Authorized JavaScript origins*: `http://localhost:4200` (frontend).
-   - *Authorized redirect URIs*: `http://localhost:3000/auth/google/callback`
+   - _Authorized JavaScript origins_: `http://localhost:4200` (frontend).
+   - _Authorized redirect URIs_: `http://localhost:3000/auth/google/callback`
      — precisa ser **idêntica** a `GOOGLE_CALLBACK_URL`.
-4. Copie *Client ID* e *Client secret* para o `.env`.
+4. Copie _Client ID_ e _Client secret_ para o `.env`.
 
 ### 4. Migrations e execução
 
@@ -117,32 +122,57 @@ produção/CI), `prisma:studio` (UI para inspecionar o banco), `build`,
 Documentação interativa (Swagger UI) em **`/docs`**; JSON OpenAPI em `/docs-json`.
 Nas rotas protegidas, clique em **Authorize** e cole o `accessToken`.
 
-| Método | Rota                    | Auth          | Descrição                                            |
-| ------ | ----------------------- | ------------- | ---------------------------------------------------- |
-| POST   | `/auth/signup`          | —             | Cadastro (email + senha). 201 → tokens + user        |
-| POST   | `/auth/login`           | —             | Login. 200 → tokens + user; 401 genérico             |
-| POST   | `/auth/refresh`         | refresh token | Novo par de tokens; o antigo é invalidado (rotação)  |
-| POST   | `/auth/logout`          | refresh token | Revoga o refresh token. 204                          |
-| GET    | `/auth/google`          | —             | Redireciona para o consentimento do Google           |
-| GET    | `/auth/google/callback` | —             | Retorno do Google → redirect para o frontend com `?code=` |
-| POST   | `/auth/google/exchange` | código        | Troca o código de uso único por tokens               |
-| GET    | `/me`                   | Bearer        | Usuário autenticado (rota protegida de exemplo)      |
+| Método | Rota                    | Auth          | `X-Client-Type` | Descrição                                                 |
+| ------ | ----------------------- | ------------- | --------------- | --------------------------------------------------------- |
+| POST   | `/auth/signup`          | —             | obrigatório     | Cadastro (email + senha). 201 → tokens + user             |
+| POST   | `/auth/login`           | —             | obrigatório     | Login. 200 → tokens + user; 401 genérico                  |
+| POST   | `/auth/refresh`         | refresh token | obrigatório     | Novo par de tokens; o antigo é invalidado (rotação)       |
+| POST   | `/auth/logout`          | refresh token | obrigatório     | Revoga o refresh token. 204                               |
+| GET    | `/auth/google`          | —             | —               | Redireciona para o consentimento do Google                |
+| GET    | `/auth/google/callback` | —             | —               | Retorno do Google → redirect para o frontend com `?code=` |
+| POST   | `/auth/google/exchange` | código        | obrigatório     | Troca o código de uso único por tokens                    |
+| GET    | `/me`                   | Bearer        | —               | Usuário autenticado (rota protegida de exemplo)           |
+
+### `X-Client-Type`: web ou mobile
+
+As rotas que emitem ou leem o refresh token exigem o header `X-Client-Type`,
+com valor `web` ou `mobile`. Ausente ou desconhecido → **400**; não há default
+silencioso, porque escolher um entregaria o token pelo canal errado.
+
+|                        | `web`                                                                                                  | `mobile`                                 |
+| ---------------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
+| Refresh token sai em   | Cookie `refreshToken` (httpOnly, `SameSite=Lax`, `Path=/auth`, `Secure` em produção, `Max-Age` 7 dias) | Corpo JSON                               |
+| Refresh token entra em | Cookie                                                                                                 | Corpo JSON (`{ "refreshToken": "..." }`) |
+| Corpo da resposta      | `accessToken` (+ `user`)                                                                               | `accessToken`, `refreshToken` (+ `user`) |
+| Token no canal errado  | 400                                                                                                    | 400                                      |
+| No logout              | Revoga no banco + `clearCookie`                                                                        | Revoga no banco                          |
+
+Rotação, detecção de reuso e revogação são **idênticas** nos dois: a única
+diferença é o transporte (`RefreshTokenTransport`). O cliente web precisa de
+`withCredentials: true` (Angular) para o cookie ir e voltar.
 
 Formato de erro (todas as rotas, via `AllExceptionsFilter`):
 
 ```json
-{ "statusCode": 401, "error": "Unauthorized", "message": "Invalid credentials", "path": "/auth/login", "timestamp": "..." }
+{
+  "statusCode": 401,
+  "error": "Unauthorized",
+  "message": "Invalid credentials",
+  "path": "/auth/login",
+  "timestamp": "..."
+}
 ```
 
 `message` é um array em erros de validação (400).
 
 ### Fluxo do cliente
 
-1. `signup`/`login` → guarda `accessToken` (memória) e `refreshToken`.
+1. `signup`/`login` com `X-Client-Type` → guarda o `accessToken` em memória. O
+   refresh token: web não o vê (está no cookie); mobile guarda em storage seguro.
 2. Chama a API com `Authorization: Bearer <accessToken>`.
-3. Ao receber 401, chama `POST /auth/refresh` com o `refreshToken`, **substitui
-   os dois tokens** pelos novos e repete a request.
-4. `POST /auth/logout` com o `refreshToken` ao sair.
+3. Ao receber 401, chama `POST /auth/refresh` (web: só o cookie, corpo vazio;
+   mobile: `{ refreshToken }`), **substitui os tokens** e repete a request.
+4. `POST /auth/logout` ao sair — web também tem o cookie apagado pela resposta.
 
 Google: abra `GET /auth/google` numa janela do browser. Após o consentimento a
 API redireciona para `FRONTEND_URL/auth/callback?code=...`; o frontend chama
@@ -182,17 +212,36 @@ reapresentado, assumimos roubo e revogamos todas as sessões do usuário. O
 logout, por outro lado, apaga o token — reenviá-lo dá um 401 simples, sem
 derrubar as outras sessões (um retry do cliente não deve deslogar o celular).
 
-**Refresh token no body, não em cookie `httpOnly`.** Trade-off consciente:
+**Dois transportes para o refresh token, um por tipo de cliente.**
 
-- Cookie `httpOnly` protege o refresh token contra XSS no browser, mas exige
-  CORS com `credentials`, mitigação de CSRF (SameSite/CSRF token), domínios
-  compatíveis entre API e SPA, e não se aplica ao app React Native.
-- Body é uniforme para web e mobile e mantém a API sem estado de cookie. O
-  custo é que o cliente web precisa guardar o refresh token (memória ou
-  storage), o que o expõe a XSS. Rotação + reuso mitigam o dano: um token
-  roubado só serve até o próximo refresh legítimo.
-- Se o frontend web quiser o cookie, dá para adicionar um modo "web" que envia
-  o refresh token em cookie `httpOnly; SameSite=Lax` sem mudar o resto.
+- **Web usa cookie `httpOnly`**: JavaScript não consegue ler o token, então um
+  XSS na SPA não o rouba. O escopo `Path=/auth` mantém o cookie fora das
+  chamadas normais da API, e `Secure` (em produção) o restringe a HTTPS.
+- **Mobile usa o corpo JSON**: app nativo não tem cookie jar de browser, e o
+  token fica no storage seguro do sistema (Keychain/Keystore).
+- Aceitar os dois canais na mesma request anularia o ganho do `httpOnly`
+  (um XSS poderia simplesmente mandar o token no corpo), por isso token no
+  canal errado é 400 — nunca fallback.
+
+**CSRF: `SameSite=Lax` basta aqui, sem token CSRF.** Avaliação:
+
+- Os únicos endpoints autenticados por cookie são `POST /auth/refresh` e
+  `POST /auth/logout`. O resto da API usa `Authorization: Bearer`, que é imune
+  a CSRF (o browser não anexa o header sozinho).
+- `SameSite=Lax` impede o browser de enviar o cookie em POST cross-site — o
+  vetor clássico (form auto-submetido em site do atacante) não sai do chão.
+- O header obrigatório `X-Client-Type` é, por si, a defesa "custom request
+  header" recomendada pela OWASP: um form HTML não consegue definí-lo, e por
+  JS ele força preflight CORS, que só a origem `FRONTEND_URL` passa.
+- Mesmo que uma request forjada passasse, o atacante não leria a resposta
+  (CORS bloqueia), então não haveria roubo de token — no pior caso uma rotação
+  forçada.
+- **O que mudaria a conclusão:** deploy em que frontend e API ficam em sites
+  registráveis diferentes (`app.vercel.app` chamando `api.onrender.com`). Aí o
+  cookie `Lax` nem seria enviado pelo XHR — o fluxo web quebraria — e trocar
+  para `SameSite=None` exigiria um token CSRF (double-submit) por cima. Com
+  API e SPA no mesmo site (`dutrail.com` e `api.dutrail.com`), `Lax` funciona.
+  Em dev, `localhost:4200` → `localhost:3000` é mesmo site (a porta não conta).
 
 **Callback do Google não coloca tokens na URL.** URLs vazam em histórico,
 logs de proxy e `Referer`. O callback gera um código de uso único (hash no
@@ -213,7 +262,8 @@ JWT fixado em HS256; `ValidationPipe` com `whitelist` + `forbidNonWhitelisted`;
 rate limit global e mais estrito em `/auth/login` e `/auth/signup` (10/min
 por IP); erros 500 nunca expõem a mensagem original; `UserResponseDto` é um
 mapeamento explícito (whitelist) — campos novos na tabela não vazam por
-acidente.
+acidente; CORS com origem explícita e `credentials: true` (exigido pelo cookie,
+e incompatível com o wildcard `*`).
 
 ## Próximos passos sugeridos
 
