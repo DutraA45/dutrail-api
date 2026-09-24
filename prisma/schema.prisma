@@ -72,8 +72,8 @@ enum ActivitySport {
   other
 }
 
-/// Uma atividade registrada (corrida, pedal...). Hoje só é lida pela API; a
-/// criação virá com a importação de arquivos .fit.
+/// Uma atividade registrada (corrida, pedal...). Criada pela importação de
+/// arquivos .fit (POST /activities/import).
 ///
 /// Unidades no nome do campo para não haver dúvida no cliente. As métricas
 /// que dependem de sensor (FC, calorias, altimetria) ficam nulas quando a
@@ -95,10 +95,19 @@ model Activity {
   maxHeartRateBpm     Int?
   // Quilocalorias (kcal), como o `total_calories` do FIT.
   calories            Int?
+  // Chave do arquivo .fit original no object storage
+  // (`activities/{userId}/{id}.fit`). Nula para atividades que não vieram de
+  // importação. Detalhe interno: não sai na resposta da API.
+  fitFileKey          String?       @unique
+  // Identidade do arquivo importado (file_id do FIT ou SHA-256 do conteúdo),
+  // usada para recusar a reimportação do mesmo arquivo pelo mesmo usuário.
+  fitFingerprint      String?
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
   // Atende a listagem (WHERE userId ORDER BY startedAt DESC, id DESC) e a
   // paginação por cursor, sem sort em memória.
   @@index([userId, startedAt(sort: Desc), id(sort: Desc)])
+  // Postgres trata NULLs como distintos: atividades sem fingerprint não colidem.
+  @@unique([userId, fitFingerprint])
 }

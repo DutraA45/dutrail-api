@@ -12,9 +12,10 @@ Contrato completo da API para quem consome o backend:
 [docs/ACTIVITIES-CONTRACT.md](docs/ACTIVITIES-CONTRACT.md) (atividades).
 
 Implementado até aqui: **autenticação** (cadastro/login com senha, refresh
-token com rotação, logout, login com Google, `GET /me`) e **leitura de
-atividades** (`GET /activities` paginado por cursor e `GET /activities/:id`). A
-importação de arquivos `.fit` ainda não existe.
+token com rotação, logout, login com Google, `GET /me`) e **atividades**
+(`GET /activities` paginado por cursor, `GET /activities/:id` e
+`POST /activities/import`, que cria a atividade a partir de um arquivo `.fit` e
+guarda o original num object storage S3-compatível).
 
 ## Stack
 
@@ -28,6 +29,9 @@ importação de arquivos `.fit` ainda não existe.
 | Validação     | class-validator / class-transformer                     |
 | Rate limiting | @nestjs/throttler                                       |
 | Cookies       | cookie-parser (refresh token do fluxo web)              |
+| Upload        | multer (via `@nestjs/platform-express`), em memória     |
+| Arquivos .fit | `@garmin/fitsdk` (SDK oficial da Garmin)                |
+| Storage       | `@aws-sdk/client-s3` → Oracle Cloud Object Storage      |
 | Docs          | @nestjs/swagger em `/docs`                              |
 | Testes        | Vitest + Supertest                                      |
 
@@ -45,7 +49,9 @@ src/
 │   ├── filters/            # AllExceptionsFilter (formato único de erro)
 │   └── dto/                # ErrorResponseDto (Swagger)
 ├── users/                  # UsersService (dados), GET /me, UserResponseDto
-├── activities/             # GET /activities (cursor), GET /activities/:id
+├── activities/             # GET /activities (cursor), GET /activities/:id, POST /activities/import
+│   ├── fit/                # parser .fit → campos de Activity (@garmin/fitsdk)
+│   └── storage/            # ActivityFileStorageService (bucket S3-compatível)
 ├── auth/
 │   ├── auth.controller.ts  # rotas /auth/*
 │   ├── auth.service.ts     # casos de uso (signup, login, google, exchange)
@@ -57,7 +63,8 @@ src/
 │   └── dto/                # DTOs de entrada/saída com @ApiProperty
 └── generated/prisma/       # client gerado (gitignored; `npm run prisma:generate`)
 prisma/schema.prisma        # User, RefreshToken, OAuthExchangeCode, Activity
-test/                       # e2e (banco real + Google mockado)
+test/                       # e2e (banco real + Google e storage mockados)
+test/fixtures/              # .fit sintético + gerador (build-fit.ts)
 ```
 
 ## Rodando localmente
@@ -93,6 +100,10 @@ Variáveis principais (todas validadas no boot — ver `src/config/env.validatio
 | `GOOGLE_CALLBACK_URL`                       | `http://localhost:3000/auth/google/callback` em dev                         |
 | `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200` |
 | `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                  |
+| `OCI_S3_ENDPOINT`                           | Endpoint S3-compatível do Object Storage (seção abaixo)                     |
+| `OCI_S3_REGION`                             | Região do bucket, ex. `sa-saopaulo-1`                                       |
+| `OCI_S3_BUCKET`                             | Bucket dos `.fit` originais, ex. `dutrail-fit-files`                        |
+| `OCI_S3_ACCESS_KEY` / `OCI_S3_SECRET_KEY`   | Customer Secret Key da Oracle (**segredo**: só no `.env`, nunca commitado)  |
 
 ```bash
 # gerar segredos
@@ -111,7 +122,28 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
      — precisa ser **idêntica** a `GOOGLE_CALLBACK_URL`.
 4. Copie _Client ID_ e _Client secret_ para o `.env`.
 
-### 4. Migrations e execução
+### 4. Object storage dos arquivos `.fit`
+
+Os `.fit` originais importados ficam num bucket do **Oracle Cloud Object
+Storage** (Always Free), acessado pela API **compatível com S3**. O código usa
+o `@aws-sdk/client-s3` genérico, não um SDK da Oracle, então trocar por outro
+provedor S3-compatível (R2, MinIO, S3...) é só trocar as variáveis `OCI_S3_*`.
+
+1. **Endpoint**:
+   `https://<namespace>.compat.objectstorage.<região>.oraclecloud.com`. O
+   namespace aparece em _Tenancy details_ ou na página do bucket.
+2. **Credenciais**: no console da Oracle, _Perfil → Customer secret keys →
+   Generate secret key_. O par (access key + secret key) vai para
+   `OCI_S3_ACCESS_KEY`/`OCI_S3_SECRET_KEY`. A secret key só é mostrada uma vez.
+3. O usuário dono da chave precisa de permissão de leitura/escrita/remoção de
+   objetos no bucket.
+
+Chave de cada objeto: `activities/{userId}/{activityId}.fit`, rastreável até o
+usuário e a atividade (`Activity.fitFileKey`). Os e2e **não** acessam o
+bucket: usam um fake em memória (`test/fakes/fake-activity-file-storage.ts`),
+e os valores de `OCI_S3_*` do `.env.test` são fictícios.
+
+### 5. Migrations e execução
 
 ```bash
 npm run prisma:migrate      # `prisma migrate dev`: aplica migrations (cria se o schema mudou)
@@ -127,16 +159,19 @@ produção/CI), `prisma:studio` (UI para inspecionar o banco), `build`,
 Documentação interativa (Swagger UI) em **`/docs`**; JSON OpenAPI em `/docs-json`.
 Nas rotas protegidas, clique em **Authorize** e cole o `accessToken`.
 
-| Método | Rota                    | Auth          | `X-Client-Type` | Descrição                                                 |
-| ------ | ----------------------- | ------------- | --------------- | --------------------------------------------------------- |
-| POST   | `/auth/signup`          | —             | obrigatório     | Cadastro (email + senha). 201 → tokens + user             |
-| POST   | `/auth/login`           | —             | obrigatório     | Login. 200 → tokens + user; 401 genérico                  |
-| POST   | `/auth/refresh`         | refresh token | obrigatório     | Novo par de tokens; o antigo é invalidado (rotação)       |
-| POST   | `/auth/logout`          | refresh token | obrigatório     | Revoga o refresh token. 204                               |
-| GET    | `/auth/google`          | —             | —               | Redireciona para o consentimento do Google                |
-| GET    | `/auth/google/callback` | —             | —               | Retorno do Google → redirect para o frontend com `?code=` |
-| POST   | `/auth/google/exchange` | código        | obrigatório     | Troca o código de uso único por tokens                    |
-| GET    | `/me`                   | Bearer        | —               | Usuário autenticado (rota protegida de exemplo)           |
+| Método | Rota                    | Auth          | `X-Client-Type` | Descrição                                                  |
+| ------ | ----------------------- | ------------- | --------------- | ---------------------------------------------------------- |
+| POST   | `/auth/signup`          | —             | obrigatório     | Cadastro (email + senha). 201 → tokens + user              |
+| POST   | `/auth/login`           | —             | obrigatório     | Login. 200 → tokens + user; 401 genérico                   |
+| POST   | `/auth/refresh`         | refresh token | obrigatório     | Novo par de tokens; o antigo é invalidado (rotação)        |
+| POST   | `/auth/logout`          | refresh token | obrigatório     | Revoga o refresh token. 204                                |
+| GET    | `/auth/google`          | —             | —               | Redireciona para o consentimento do Google                 |
+| GET    | `/auth/google/callback` | —             | —               | Retorno do Google → redirect para o frontend com `?code=`  |
+| POST   | `/auth/google/exchange` | código        | obrigatório     | Troca o código de uso único por tokens                     |
+| GET    | `/me`                   | Bearer        | —               | Usuário autenticado (rota protegida de exemplo)            |
+| GET    | `/activities`           | Bearer        | —               | Atividades do usuário, paginadas por cursor                |
+| GET    | `/activities/:id`       | Bearer        | —               | Detalhe de uma atividade                                   |
+| POST   | `/activities/import`    | Bearer        | —               | Upload `.fit` (multipart `file`, ≤ 10 MiB). 201 → Activity |
 
 ### `X-Client-Type`: web ou mobile
 
@@ -192,12 +227,16 @@ npm run test:e2e            # e2e: precisa do Postgres do compose (banco dutrail
 npm run test:cov            # cobertura dos unitários
 ```
 
-Os e2e (`test/auth.e2e-spec.ts`) sobem a aplicação completa contra um banco
+Os e2e (`test/*.e2e-spec.ts`) sobem a aplicação completa contra um banco
 real. `test/global-setup.ts` carrega `.env.test` e roda `prisma migrate
 deploy`; cada teste **trunca as tabelas** (por isso há uma trava exigindo que
 `DATABASE_URL` contenha `test`). A `GoogleStrategy` é substituída por
 `test/fakes/fake-google.strategy.ts`, que devolve um perfil configurável sem
 falar com o Google, mas exercita a lógica real de criação/vinculação de conta.
+O storage dos `.fit` também é um fake em memória, o que permite simular falha
+do provedor. O fixture `test/fixtures/running.fit` é sintético, gerado pelo
+Encoder da Garmin, e não contém GPS. Para regenerá-lo, rode
+`node test/fixtures/build-fit.ts`.
 
 Para usar outro banco nos e2e (ex.: um branch do Neon no CI), exporte
 `DATABASE_URL` antes de rodar — variáveis do ambiente vencem o `.env.test`.
@@ -270,11 +309,23 @@ mapeamento explícito (whitelist) — campos novos na tabela não vazam por
 acidente; CORS com origem explícita e `credentials: true` (exigido pelo cookie,
 e incompatível com o wildcard `*`).
 
+**Importação de `.fit`.** O dono vem sempre do token. O arquivo é validado
+pelo conteúdo (cabeçalho FIT + CRC), e não pela extensão, com teto de 10 MiB
+no multer (413) e rate limit próprio (20/min), porque o parse roda no event
+loop. Banco e bucket não compartilham transação. A consistência vem da ordem
+das etapas: parse e checagem de duplicidade → upload → INSERT. Se o INSERT
+falhar, o objeto enviado é apagado; se até essa remoção falhar, a chave vai
+para o log. Falhas do storage viram 500 genérico, e o detalhe fica só no log.
+
 ## Próximos passos sugeridos
 
 - Job para apagar `RefreshToken`/`OAuthExchangeCode` expirados (hoje só acumulam).
 - Verificação de email e reset de senha (exigem envio de email).
 - `POST /auth/google/token` recebendo o `idToken` do Google Sign-In nativo, para
   o app React Native não depender do fluxo de redirect.
+- Apagar do bucket os `.fit` de um usuário removido: o `onDelete: Cascade`
+  apaga as atividades, mas não os objetos no storage.
+- Parse do `.fit` num worker thread, se arquivos grandes virarem rotina (~1 s
+  de CPU no event loop perto do limite de 10 MiB).
 - `trust proxy` no Express quando a API for para trás de um load balancer
   (comentado em `src/app.setup.ts`), senão o rate limit vê o IP do proxy.

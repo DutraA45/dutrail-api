@@ -67,6 +67,27 @@ export class EnvironmentVariables {
   @IsUrl({ require_tld: false })
   GOOGLE_CALLBACK_URL: string;
 
+  // Object storage S3-compatível (hoje Oracle Cloud) onde ficam os .fit
+  // originais. Qualquer provedor que fale a API do S3 serve.
+  @IsUrl({ require_tld: false })
+  OCI_S3_ENDPOINT: string;
+
+  @IsString()
+  @IsNotEmpty()
+  OCI_S3_REGION: string;
+
+  @IsString()
+  @IsNotEmpty()
+  OCI_S3_BUCKET: string;
+
+  @IsString()
+  @IsNotEmpty()
+  OCI_S3_ACCESS_KEY: string;
+
+  @IsString()
+  @IsNotEmpty()
+  OCI_S3_SECRET_KEY: string;
+
   @IsInt()
   @Min(1)
   THROTTLE_TTL_MS: number = 60_000;

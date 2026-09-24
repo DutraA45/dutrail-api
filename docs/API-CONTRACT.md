@@ -166,8 +166,8 @@ Todo erro sai neste formato (filtro global):
 | 400    | Body inválido, campo desconhecido, `code` com tamanho ≠ 43, **`X-Client-Type` ausente/inválido**, **refresh token no canal errado**                                         | Mostra os erros de campo (`message` pode ser array)                   |
 | 401    | Credenciais erradas, email inexistente, conta só-Google, access token ausente/inválido/expirado, refresh token ausente/inválido/expirado/revogado, código de troca inválido | Em request comum, tenta refresh; em `/auth/refresh`, faz logout local |
 | 404    | Token válido de um usuário que foi apagado                                                                                                                                  | Limpa a sessão local                                                  |
-| 409    | `POST /auth/signup` com email já cadastrado                                                                                                                                 | Mostra "email já em uso" no formulário                                |
-| 429    | Rate limit: 10 req/min por IP em `/auth/login` e `/auth/signup`; 100 req/min no resto                                                                                       | Mostra "muitas tentativas, aguarde"                                   |
+| 409    | `POST /auth/signup` com email já cadastrado; `POST /activities/import` com arquivo já importado                                                                             | Mostra "email já em uso" (signup) ou "já importada" (importação)      |
+| 429    | Rate limit: 10 req/min por IP em `/auth/login` e `/auth/signup`; 20 em `POST /activities/import`; 100 no resto                                                              | Mostra "muitas tentativas, aguarde"                                   |
 
 Casos específicos do transporte:
 
