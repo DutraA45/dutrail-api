@@ -28,6 +28,7 @@ model User {
 
   refreshTokens      RefreshToken[]
   oauthExchangeCodes OAuthExchangeCode[]
+  activities         Activity[]
 }
 
 /// Uma linha por refresh token emitido. Guardamos apenas o SHA-256 do token:
@@ -57,4 +58,47 @@ model OAuthExchangeCode {
   expiresAt DateTime
   usedAt    DateTime?
   createdAt DateTime  @default(now())
+}
+
+/// Modalidade da atividade. Os valores seguem os nomes do campo `sport` do
+/// protocolo FIT (origem prevista dos dados); o que não tiver equivalente
+/// aqui vira `other`. Novos valores exigem migration (ALTER TYPE ... ADD VALUE).
+enum ActivitySport {
+  running
+  cycling
+  walking
+  hiking
+  swimming
+  other
+}
+
+/// Uma atividade registrada (corrida, pedal...). Hoje só é lida pela API; a
+/// criação virá com a importação de arquivos .fit.
+///
+/// Unidades no nome do campo para não haver dúvida no cliente. As métricas
+/// que dependem de sensor (FC, calorias, altimetria) ficam nulas quando a
+/// origem não tem a informação.
+model Activity {
+  id                  String        @id @default(uuid())
+  userId              String
+  user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                String
+  sport               ActivitySport
+  startedAt           DateTime
+  // Tempo total, pausas incluídas.
+  elapsedTimeSeconds  Int
+  // Tempo em movimento (sem pausas).
+  movingTimeSeconds   Int?
+  distanceMeters      Float?
+  elevationGainMeters Float?
+  averageHeartRateBpm Int?
+  maxHeartRateBpm     Int?
+  // Quilocalorias (kcal), como o `total_calories` do FIT.
+  calories            Int?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  // Atende a listagem (WHERE userId ORDER BY startedAt DESC, id DESC) e a
+  // paginação por cursor, sem sort em memória.
+  @@index([userId, startedAt(sort: Desc), id(sort: Desc)])
 }

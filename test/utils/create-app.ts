@@ -10,7 +10,7 @@ import { FakeGoogleStrategy } from '../fakes/fake-google.strategy.js';
 export interface TestApp {
   app: INestApplication;
   prisma: PrismaService;
-  /** Limpa todas as tabelas (CASCADE cuida de RefreshToken e OAuthExchangeCode). */
+  /** Limpa todas as tabelas (CASCADE cuida das tabelas filhas de User). */
   resetDb(): Promise<void>;
   close(): Promise<void>;
 }

@@ -46,7 +46,7 @@ export function configureApp(app: INestApplication): void {
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Dutrail API')
     .setDescription(
-      'API do Dutrail (atividades ao ar livre). Módulo de autenticação.',
+      'API do Dutrail (atividades ao ar livre): autenticação e atividades.',
     )
     .setVersion('0.1')
     // Habilita o botão "Authorize" no Swagger para colar o access token.

@@ -7,10 +7,14 @@ por um app React Native — por isso a API é agnóstica de cliente: o mesmo
 endpoint atende os dois, e o header `X-Client-Type` define apenas **por onde** o
 refresh token trafega (cookie httpOnly para web, corpo JSON para mobile).
 
-Contrato completo da API para quem consome o backend: [docs/API-CONTRACT.md](docs/API-CONTRACT.md).
+Contrato completo da API para quem consome o backend:
+[docs/API-CONTRACT.md](docs/API-CONTRACT.md) (autenticação) e
+[docs/ACTIVITIES-CONTRACT.md](docs/ACTIVITIES-CONTRACT.md) (atividades).
 
-Esta etapa cobre **autenticação**: cadastro/login com senha, refresh token com
-rotação, logout, login com Google e uma rota protegida de exemplo.
+Implementado até aqui: **autenticação** (cadastro/login com senha, refresh
+token com rotação, logout, login com Google, `GET /me`) e **leitura de
+atividades** (`GET /activities` paginado por cursor e `GET /activities/:id`). A
+importação de arquivos `.fit` ainda não existe.
 
 ## Stack
 
@@ -41,6 +45,7 @@ src/
 │   ├── filters/            # AllExceptionsFilter (formato único de erro)
 │   └── dto/                # ErrorResponseDto (Swagger)
 ├── users/                  # UsersService (dados), GET /me, UserResponseDto
+├── activities/             # GET /activities (cursor), GET /activities/:id
 ├── auth/
 │   ├── auth.controller.ts  # rotas /auth/*
 │   ├── auth.service.ts     # casos de uso (signup, login, google, exchange)
@@ -51,7 +56,7 @@ src/
 │   ├── guards/             # JwtAuthGuard (global), GoogleAuthGuard
 │   └── dto/                # DTOs de entrada/saída com @ApiProperty
 └── generated/prisma/       # client gerado (gitignored; `npm run prisma:generate`)
-prisma/schema.prisma        # User, RefreshToken, OAuthExchangeCode
+prisma/schema.prisma        # User, RefreshToken, OAuthExchangeCode, Activity
 test/                       # e2e (banco real + Google mockado)
 ```
 
