@@ -84,7 +84,8 @@ export class AuthService {
    * Chamado pela GoogleStrategy após o Google confirmar a identidade.
    *
    * 1. Já existe usuário com este googleId  -> login.
-   * 2. Existe usuário com o mesmo email     -> vincula a conta Google a ele.
+   * 2. Existe usuário com o mesmo email     -> vincula a conta Google a ele
+   *    (se o email dele não era verificado, descarta senha e sessões).
    * 3. Não existe                           -> cria usuário sem senha.
    */
   async loginWithGoogle(profile: GoogleProfile): Promise<User> {
@@ -102,11 +103,15 @@ export class AuthService {
 
     const byEmail = await this.usersService.findByEmail(profile.email);
     if (byEmail) {
-      return this.usersService.linkGoogleAccount(byEmail.id, {
+      const data = {
         googleId: profile.googleId,
         name: byEmail.name ?? profile.name,
         avatarUrl: byEmail.avatarUrl ?? profile.avatarUrl,
-      });
+      };
+      if (byEmail.emailVerified) {
+        return this.usersService.linkGoogleAccount(byEmail.id, data);
+      }
+      return this.takeOverUnverifiedAccount(byEmail.id, data);
     }
 
     return this.usersService.create({
@@ -115,6 +120,35 @@ export class AuthService {
       name: profile.name,
       avatarUrl: profile.avatarUrl,
       emailVerified: true,
+    });
+  }
+
+  /**
+   * Vincula o Google a uma conta local cujo email nunca foi verificado.
+   *
+   * Nada garante que quem fez o signup era o dono do email (account
+   * pre-hijacking: alguém cadastra o email da vítima com uma senha própria e
+   * espera ela entrar com Google). O Google acabou de provar quem é o dono,
+   * então tudo que veio antes é descartado: a senha e as sessões (refresh
+   * tokens e códigos de troca pendentes). Numa transação só, para que a conta
+   * nunca fique vinculada com a credencial antiga ainda valendo.
+   *
+   * Os refresh tokens são apagados, não marcados com `revokedAt`: um token
+   * revogado reapresentado aciona a detecção de reuso, e o antigo dono o usaria
+   * para derrubar as sessões do dono real sempre que quisesse.
+   */
+  private takeOverUnverifiedAccount(
+    userId: string,
+    data: { googleId: string; name?: string; avatarUrl?: string },
+  ): Promise<User> {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.refreshToken.deleteMany({ where: { userId } });
+      await tx.oAuthExchangeCode.deleteMany({ where: { userId } });
+      return this.usersService.linkGoogleAccount(
+        userId,
+        { ...data, discardPassword: true },
+        tx,
+      );
     });
   }
 

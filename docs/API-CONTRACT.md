@@ -68,7 +68,9 @@ sempre este:
 }
 ```
 
-`hasPassword: false` identifica conta criada via Google que nunca definiu senha.
+`hasPassword: false` identifica conta sem senha: criada via Google, ou conta
+local com email não verificado cuja senha foi descartada ao ser vinculada ao
+Google (ver [Login com Google](#login-com-google)).
 
 ## Validade dos tokens
 
@@ -244,10 +246,34 @@ URL** depois. Se o componente inicializar duas vezes, ou o usuário der F5 na
 URL de callback, a segunda troca retorna 401 — trate como "sessão não
 estabelecida, refaça o login", não como erro fatal.
 
-Vinculação de conta (backend): `googleId` existente → login direto; mesmo email
-**verificado pelo Google** → vincula e a senha antiga continua valendo
-(`hasPassword: true`); nada encontrado → cria conta sem senha
-(`hasPassword: false`). O payload de resposta é o mesmo nos três casos.
+Vinculação de conta (backend), sempre exigindo email **verificado pelo
+Google**:
+
+| Situação no backend                                   | Resultado                                                        | `hasPassword` |
+| ----------------------------------------------------- | ---------------------------------------------------------------- | ------------- |
+| `googleId` já vinculado                               | Login direto                                                     | inalterado    |
+| Conta local com o mesmo email, `emailVerified: true`  | Vincula; senha e sessões existentes continuam valendo            | inalterado    |
+| Conta local com o mesmo email, `emailVerified: false` | Descarta a senha e **todas** as sessões da conta, depois vincula | `false`       |
+| Nenhuma conta                                         | Cria conta sem senha                                             | `false`       |
+
+O payload de resposta é o mesmo nos quatro casos.
+
+Por que a conta não verificada perde a senha: o cadastro por email não
+comprova a posse do email, então quem fez o signup pode não ser o dono (alguém
+cadastra o email de outra pessoa e espera ela entrar com Google). Ao vincular,
+o backend apaga numa única transação o `passwordHash`, todos os refresh tokens
+e os códigos de troca pendentes da conta. Consequências para o cliente:
+
+- Login por senha nessa conta passa a responder **401 `Invalid credentials`**;
+  o usuário só entra com Google.
+- Refresh tokens emitidos antes da vinculação passam a responder **401
+  `Invalid refresh token`**, em qualquer dispositivo. Trate como sessão
+  encerrada e mande para o login.
+- Access tokens já emitidos continuam válidos até expirar (são stateless; até
+  `JWT_ACCESS_TTL`, 15 minutos por padrão).
+- **Ainda não existe fluxo para definir uma senha nova** (ver
+  [Lacunas conhecidas](#lacunas-conhecidas)). Com `hasPassword: false`, não
+  ofereça login por senha para essa conta.
 
 ## Interceptor
 
@@ -350,7 +376,9 @@ Não implementadas nesta etapa — o cliente não deve contar com elas:
 - **Verificação de email e reset de senha** (dependem de envio de email).
 - **Login nativo com Google no Android** (`POST /auth/google/token`
   recebendo o `idToken`). Hoje só existe o fluxo de redirect.
-- **Definição de senha para conta criada via Google** (`hasPassword: false`).
+- **Definição de senha para conta sem senha** (`hasPassword: false`): contas
+  criadas via Google e contas locais não verificadas que perderam a senha ao
+  serem vinculadas ao Google.
 - **Alteração de perfil** (nome, avatar). `GET /me` é somente leitura.
 - **`SameSite=None` configurável por ambiente**: hoje `Lax` é fixo no código
   (`RefreshTokenTransport.cookieOptions`).
