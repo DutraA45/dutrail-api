@@ -70,6 +70,29 @@ sempre este:
 
 `hasPassword: false` identifica conta criada via Google que nunca definiu senha.
 
+## Validade dos tokens
+
+Os valores abaixo são o **padrão, configurável por variável de ambiente** no
+servidor; não são garantia e podem mudar por ambiente.
+
+| Token   | Variável          | Padrão     |
+| ------- | ----------------- | ---------- |
+| Access  | `JWT_ACCESS_TTL`  | 15 minutos |
+| Refresh | `JWT_REFRESH_TTL` | 7 dias     |
+
+A validade do refresh token é uma **janela deslizante**, igual nos dois fluxos:
+cada chamada bem-sucedida a `/auth/refresh` emite um refresh token novo com a
+validade completa contada a partir daquele momento, e não herda o prazo do login
+original. Não há limite absoluto de duração da sessão: ela só expira se o
+cliente passar um período inteiro de `JWT_REFRESH_TTL` sem renovar, ou se for
+revogada (logout ou detecção de reuso). Por isso o cliente não precisa agendar
+renovação: basta renovar ao receber 401 (ver [Interceptor](#interceptor)).
+
+No fluxo web, o `Max-Age` do cookie é fixo em 7 dias no código
+(`REFRESH_COOKIE_MAX_AGE_MS`) e **não** acompanha `JWT_REFRESH_TTL`. Se a
+variável for alterada, a validade real continua sendo a do token (verificada no
+servidor), mas o browser descarta o cookie após 7 dias.
+
 ## Endpoints
 
 | Método | Rota                    | `X-Client-Type` | Corpo enviado                         | Sucesso | Resposta                              |
