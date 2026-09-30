@@ -33,7 +33,8 @@ guarda o original num object storage S3-compatível).
 | Upload        | multer (via `@nestjs/platform-express`), em memória     |
 | Arquivos .fit | `@garmin/fitsdk` (SDK oficial da Garmin)                |
 | Storage       | `@aws-sdk/client-s3` → Oracle Cloud Object Storage      |
-| Docs          | @nestjs/swagger em `/docs`                              |
+| Docs          | @nestjs/swagger em `/docs` (fora de produção)           |
+| Cabeçalhos    | helmet (HSTS, CSP, nosniff, Referrer-Policy)            |
 | Testes        | Vitest + Supertest                                      |
 
 ## Estrutura
@@ -41,7 +42,7 @@ guarda o original num object storage S3-compatível).
 ```
 src/
 ├── main.ts                 # bootstrap
-├── app.setup.ts            # pipes globais, CORS, Swagger (reusado nos e2e)
+├── app.setup.ts            # helmet, pipes globais, CORS, Swagger (reusado nos e2e)
 ├── app.module.ts           # ConfigModule, Throttler, filtro global de erros
 ├── config/env.validation.ts    # contrato + validação das variáveis de ambiente
 ├── prisma/                 # PrismaService (global)
@@ -174,7 +175,9 @@ ambiente ou no `.env`.
 ## Endpoints
 
 Documentação interativa (Swagger UI) em **`/docs`**; JSON OpenAPI em `/docs-json`.
-Nas rotas protegidas, clique em **Authorize** e cole o `accessToken`.
+Nas rotas protegidas, clique em **Authorize** e cole o `accessToken`. O Swagger
+só é registrado fora de produção: com `NODE_ENV=production`, `/docs`,
+`/docs-json` e `/docs-yaml` respondem 404.
 
 | Método | Rota                    | Auth          | `X-Client-Type` | Descrição                                                  |
 | ------ | ----------------------- | ------------- | --------------- | ---------------------------------------------------------- |
@@ -255,6 +258,11 @@ do provedor. O fixture `test/fixtures/running.fit` é sintético, gerado pelo
 Encoder da Garmin, e não contém GPS. Para regenerá-lo, rode
 `node test/fixtures/build-fit.ts`.
 
+`test/swagger-by-env.e2e-spec.ts` sobe a app também com `NODE_ENV=development`
+e `production` (reimportando o `AppModule` com o ambiente trocado). Todas as
+variáveis vêm do `.env.test`, e em produção os segredos são gerados na hora,
+só para aquele processo.
+
 Para usar outro banco nos e2e (ex.: um branch do Neon no CI), exporte
 `DATABASE_URL` antes de rodar — variáveis do ambiente vencem o `.env.test`.
 
@@ -326,6 +334,29 @@ por IP); erros 500 nunca expõem a mensagem original; `UserResponseDto` é um
 mapeamento explícito (whitelist) — campos novos na tabela não vazam por
 acidente; CORS com origem explícita e `credentials: true` (exigido pelo cookie,
 e incompatível com o wildcard `*`).
+
+**Cabeçalhos de segurança (helmet).** Toda resposta, inclusive 401/404,
+sai com:
+
+- `Strict-Transport-Security: max-age=31536000; includeSubDomains` (sem
+  `preload`). **A aplicação emite o HSTS.** Se o proxy reverso da VM também
+  emitir, tudo bem, desde que com o mesmo valor. Com dois headers HSTS na
+  resposta, o browser processa só o primeiro (RFC 6797 §8.1), e a política
+  efetiva passaria a depender da ordem em que o proxy insere o dele. O mais
+  simples é o proxy não adicionar o seu nem sobrescrever o da app.
+- CSP padrão do helmet com `frame-ancestors 'none'`, mais
+  `X-Frame-Options: DENY` para browsers antigos.
+- `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. Sem
+  `X-Powered-By`.
+- `Cross-Origin-Resource-Policy: same-origin` (padrão do helmet). O frontend
+  não é afetado: o browser só aplica o CORP a requests `no-cors` (`<img>`,
+  `<script>`), e o Angular chama a API com `fetch`/XHR em modo CORS.
+
+As rotas do Swagger (`/docs`, `/docs/*`, `/docs-json`), que só existem fora
+de produção, recebem a mesma CSP sem `upgrade-insecure-requests`. Em
+`http://localhost` essa diretiva mandaria os assets e o "Try it out" para
+`https://`. O resto da CSP basta para a UI: scripts vêm do próprio `/docs` e
+os `<style>` inline já são permitidos pela padrão.
 
 **Importação de `.fit`.** O dono vem sempre do token. O arquivo é validado
 pelo conteúdo (cabeçalho FIT + CRC), e não pela extensão, com teto de 10 MiB

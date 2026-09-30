@@ -10,6 +10,10 @@ Espelha o comportamento verificado pelos testes em
 [`test/auth.e2e-spec.ts`](../test/auth.e2e-spec.ts); a documentação interativa
 fica em `/docs` e o OpenAPI JSON em `/docs-json`.
 
+> **Em produção, `/docs` e `/docs-json` não existem (404).** O Swagger só é
+> registrado com `NODE_ENV` diferente de `production`; em produção, este
+> documento é a referência.
+
 As rotas de atividades (`/activities`) estão em
 [`ACTIVITIES-CONTRACT.md`](ACTIVITIES-CONTRACT.md); os padrões descritos aqui
 (Bearer, formato de erro, interceptor) valem para elas também.
