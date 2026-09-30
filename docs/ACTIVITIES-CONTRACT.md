@@ -1,9 +1,9 @@
 # Contrato da API de Atividades — Dutrail
 
 Referência para quem consome as rotas `/activities` (frontend Angular e,
-futuramente, o app React Native). Espelha o comportamento verificado por
-[`test/activities.e2e-spec.ts`](../test/activities.e2e-spec.ts). A
-autenticação, o formato de erro e o interceptor estão em
+futuramente, o app Android nativo em Kotlin). Espelha o comportamento
+verificado por [`test/activities.e2e-spec.ts`](../test/activities.e2e-spec.ts).
+A autenticação, o formato de erro e o interceptor estão em
 [`API-CONTRACT.md`](API-CONTRACT.md); a documentação interativa fica em `/docs`.
 
 Estado desta etapa: listagem, detalhe e **criação por importação de arquivo

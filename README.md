@@ -3,9 +3,10 @@
 Backend do Dutrail (app de atividades ao ar livre, estilo Strava). API REST em
 [NestJS](https://nestjs.com) + [Prisma](https://www.prisma.io) + PostgreSQL
 ([Neon](https://neon.tech)), consumida pelo frontend Angular e, futuramente,
-por um app React Native — por isso a API é agnóstica de cliente: o mesmo
-endpoint atende os dois, e o header `X-Client-Type` define apenas **por onde** o
-refresh token trafega (cookie httpOnly para web, corpo JSON para mobile).
+por um app Android nativo em Kotlin — por isso a API é agnóstica de cliente: o
+mesmo endpoint atende os dois, e o header `X-Client-Type` define apenas **por
+onde** o refresh token trafega (cookie httpOnly para web, corpo JSON para
+mobile).
 
 Contrato completo da API para quem consome o backend:
 [docs/API-CONTRACT.md](docs/API-CONTRACT.md) (autenticação) e
@@ -262,7 +263,8 @@ derrubar as outras sessões (um retry do cliente não deve deslogar o celular).
   XSS na SPA não o rouba. O escopo `Path=/auth` mantém o cookie fora das
   chamadas normais da API, e `Secure` (em produção) o restringe a HTTPS.
 - **Mobile usa o corpo JSON**: app nativo não tem cookie jar de browser, e o
-  token fica no storage seguro do sistema (Keychain/Keystore).
+  token fica no armazenamento seguro do Android (Android Keystore protegendo
+  os tokens, ex. DataStore criptografado).
 - Aceitar os dois canais na mesma request anularia o ganho do `httpOnly`
   (um XSS poderia simplesmente mandar o token no corpo), por isso token no
   canal errado é 400 — nunca fallback.
@@ -322,7 +324,7 @@ para o log. Falhas do storage viram 500 genérico, e o detalhe fica só no log.
 - Job para apagar `RefreshToken`/`OAuthExchangeCode` expirados (hoje só acumulam).
 - Verificação de email e reset de senha (exigem envio de email).
 - `POST /auth/google/token` recebendo o `idToken` do Google Sign-In nativo, para
-  o app React Native não depender do fluxo de redirect.
+  o app Android não depender do fluxo de redirect.
 - Apagar do bucket os `.fit` de um usuário removido: o `onDelete: Cascade`
   apaga as atividades, mas não os objetos no storage.
 - Parse do `.fit` num worker thread, se arquivos grandes virarem rotina (~1 s

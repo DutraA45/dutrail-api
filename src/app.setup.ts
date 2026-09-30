@@ -27,7 +27,7 @@ export function configureApp(app: INestApplication): void {
     }),
   );
 
-  // Só o frontend web precisa de CORS; apps nativos (React Native) não têm
+  // Só o frontend web precisa de CORS; apps nativos (Android) não têm
   // "origin" e não passam por essa checagem.
   //
   // `credentials: true` é obrigatório para o cookie httpOnly do refresh token:

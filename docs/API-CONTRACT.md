@@ -1,7 +1,7 @@
 # Contrato da API de Autenticação — Dutrail
 
 Referência para quem consome esta API (frontend Angular e, futuramente, o app
-React Native). Espelha o comportamento verificado pelos testes em
+Android nativo em Kotlin). Espelha o comportamento verificado pelos testes em
 [`test/auth.e2e-spec.ts`](../test/auth.e2e-spec.ts), que rodam os mesmos
 cenários para os dois tipos de cliente; a documentação interativa fica em
 `/docs` e o OpenAPI JSON em `/docs-json`.
@@ -14,10 +14,10 @@ O **access token** sempre vai no corpo JSON e volta em
 `Authorization: Bearer <accessToken>`. O **refresh token** tem dois transportes,
 escolhidos pelo header obrigatório `X-Client-Type`:
 
-| `X-Client-Type` | Refresh token trafega em             | Cliente                  |
-| --------------- | ------------------------------------ | ------------------------ |
-| `web`           | Cookie `httpOnly` (o cliente não vê) | Angular                  |
-| `mobile`        | Corpo JSON                           | React Native (e cURL/CI) |
+| `X-Client-Type` | Refresh token trafega em             | Cliente                         |
+| --------------- | ------------------------------------ | ------------------------------- |
+| `web`           | Cookie `httpOnly` (o cliente não vê) | Angular                         |
+| `mobile`        | Corpo JSON                           | App Android, Kotlin (e cURL/CI) |
 
 Base em desenvolvimento: `http://localhost:3000`; CORS liberado apenas para a
 origem em `FRONTEND_URL` (`http://localhost:4200`), com `credentials: true`.
@@ -39,16 +39,16 @@ de browser, que não permite headers customizados).
 
 ## Os dois fluxos lado a lado
 
-|                                | `web`                                                                                           | `mobile`                                 |
-| ------------------------------ | ----------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| Configuração do cliente        | `withCredentials: true` em todas as chamadas                                                    | Nada (sem cookies)                       |
-| Corpo de signup/login/exchange | `{ accessToken, user }`                                                                         | `{ accessToken, refreshToken, user }`    |
-| Corpo de `/auth/refresh`       | `{ accessToken }`                                                                               | `{ accessToken, refreshToken }`          |
-| `Set-Cookie` na resposta       | `refreshToken=...; Max-Age=604800; Path=/auth; HttpOnly; SameSite=Lax` (+ `Secure` em produção) | nunca                                    |
-| Enviar o refresh token         | Automático (cookie); corpo deve ficar **vazio**                                                 | `{ "refreshToken": "eyJ..." }` no corpo  |
-| Token no canal errado          | Corpo preenchido → **400**                                                                      | Cookie `refreshToken` presente → **400** |
-| Logout                         | Revoga no banco + apaga o cookie (`Set-Cookie: refreshToken=; Expires=1970`)                    | Revoga no banco                          |
-| Onde o cliente guarda          | Em nenhum lugar — o cookie é `httpOnly`                                                         | Storage seguro do SO (Keychain/Keystore) |
+|                                | `web`                                                                                           | `mobile`                                                                                             |
+| ------------------------------ | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Configuração do cliente        | `withCredentials: true` em todas as chamadas                                                    | Nada (sem cookies)                                                                                   |
+| Corpo de signup/login/exchange | `{ accessToken, user }`                                                                         | `{ accessToken, refreshToken, user }`                                                                |
+| Corpo de `/auth/refresh`       | `{ accessToken }`                                                                               | `{ accessToken, refreshToken }`                                                                      |
+| `Set-Cookie` na resposta       | `refreshToken=...; Max-Age=604800; Path=/auth; HttpOnly; SameSite=Lax` (+ `Secure` em produção) | nunca                                                                                                |
+| Enviar o refresh token         | Automático (cookie); corpo deve ficar **vazio**                                                 | `{ "refreshToken": "eyJ..." }` no corpo                                                              |
+| Token no canal errado          | Corpo preenchido → **400**                                                                      | Cookie `refreshToken` presente → **400**                                                             |
+| Logout                         | Revoga no banco + apaga o cookie (`Set-Cookie: refreshToken=; Expires=1970`)                    | Revoga no banco                                                                                      |
+| Onde o cliente guarda          | Em nenhum lugar — o cookie é `httpOnly`                                                         | Armazenamento seguro do Android (Android Keystore protegendo os tokens, ex. DataStore criptografado) |
 
 Rotação, detecção de reuso e revogação são **idênticas** nos dois: só o
 transporte muda. O banco guarda apenas o SHA-256 do token nos dois casos.
@@ -286,6 +286,8 @@ intercept(req: HttpRequest<unknown>, next: HttpHandler) {
 
 No mobile é o mesmo esqueleto, com duas diferenças: `X-Client-Type: mobile`,
 e o refresh manda/recebe o token no corpo (`{ refreshToken }` → salvar o novo).
+No Android, o equivalente é um `Authenticator`/`Interceptor` do OkHttp, com a
+mesma regra de um único refresh em voo.
 
 Na inicialização do app: chame `/auth/refresh` **antes** de renderizar rotas
 protegidas (web: basta o cookie; mobile: se houver token salvo) e trate 401
@@ -323,7 +325,7 @@ Não implementadas nesta etapa — o cliente não deve contar com elas:
   na URL da API em vez de redirecionar para o frontend. Correção prevista:
   redirecionar para `{FRONTEND_URL}/auth/callback?error=access_denied`.
 - **Verificação de email e reset de senha** (dependem de envio de email).
-- **Login nativo com Google no React Native** (`POST /auth/google/token`
+- **Login nativo com Google no Android** (`POST /auth/google/token`
   recebendo o `idToken`). Hoje só existe o fluxo de redirect.
 - **Definição de senha para conta criada via Google** (`hasPassword: false`).
 - **Alteração de perfil** (nome, avatar). `GET /me` é somente leitura.
