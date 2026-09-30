@@ -328,6 +328,26 @@ contrário alguém poderia criar uma conta Google com o email de outra pessoa e
 sequestrar a conta local. Contas criadas via Google ficam com `passwordHash`
 nulo e recebem o mesmo 401 genérico se alguém tentar login por senha.
 
+Ao vincular por email, o resultado depende de a conta local já ter o email
+verificado:
+
+- **Email não verificado** (caso de todo signup por senha, porque ainda não
+  há verificação de email): nada garante que quem fez o cadastro era o dono do
+  email. Sem o descarte, quem cadastrou o email de outra pessoa com uma senha
+  própria continuaria entrando na conta depois que a dona a vinculasse ao
+  Google (_account pre-hijacking_, A-01 em
+  [docs/SECURITY-AUDIT.md](docs/SECURITY-AUDIT.md)). Por isso, numa
+  única transação, a conta **perde a senha** (`passwordHash` nulo, e
+  `hasPassword: false` na resposta) e **todas as sessões** (refresh tokens e
+  códigos de troca pendentes são apagados). A partir daí o login é só com
+  Google.
+- **Email já verificado**: a conta ganha o `googleId` e **mantém a senha** e
+  as sessões.
+
+Ainda não existe fluxo para definir uma senha nova: uma conta que perdeu a
+senha na vinculação só volta a ter login por senha quando houver reset de
+senha (ver Próximos passos).
+
 **Senhas.** Argon2id (parâmetros OWASP: 19 MiB, t=2, p=1). No login, quando o
 email não existe, ainda verificamos contra um hash "dummy" para a resposta
 demorar o mesmo tempo e não revelar por timing quais emails estão cadastrados.
