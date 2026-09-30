@@ -92,24 +92,34 @@ cp .env.example .env        # edite os valores
 
 Variáveis principais (todas validadas no boot — ver `src/config/env.validation.ts`):
 
-| Variável                                    | Descrição                                                                   |
-| ------------------------------------------- | --------------------------------------------------------------------------- |
-| `DATABASE_URL`                              | Connection string do Postgres (Neon ou local)                               |
-| `JWT_SECRET` / `JWT_REFRESH_SECRET`         | Segredos **diferentes**, ≥ 32 chars. Gere com o comando abaixo              |
-| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`        | Expirações (`15m`, `7d`)                                                    |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                                            |
-| `GOOGLE_CALLBACK_URL`                       | `http://localhost:3000/auth/google/callback` em dev                         |
-| `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200` |
-| `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                  |
-| `OCI_S3_ENDPOINT`                           | Endpoint S3-compatível do Object Storage (seção abaixo)                     |
-| `OCI_S3_REGION`                             | Região do bucket, ex. `sa-saopaulo-1`                                       |
-| `OCI_S3_BUCKET`                             | Bucket dos `.fit` originais, ex. `dutrail-fit-files`                        |
-| `OCI_S3_ACCESS_KEY` / `OCI_S3_SECRET_KEY`   | Customer Secret Key da Oracle (**segredo**: só no `.env`, nunca commitado)  |
+| Variável                                    | Descrição                                                                         |
+| ------------------------------------------- | --------------------------------------------------------------------------------- |
+| `NODE_ENV`                                  | **Obrigatório**, sem default: `development`, `test` ou `production`               |
+| `DATABASE_URL`                              | Connection string do Postgres (Neon ou local)                                     |
+| `JWT_SECRET` / `JWT_REFRESH_SECRET`         | Segredos **diferentes**, ≥ 32 chars (≥ 43 em produção). Gere com o comando abaixo |
+| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`        | Expirações (`15m`, `7d`)                                                          |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                                                  |
+| `GOOGLE_CALLBACK_URL`                       | `http://localhost:3000/auth/google/callback` em dev                               |
+| `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200`       |
+| `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                        |
+| `OCI_S3_ENDPOINT`                           | Endpoint S3-compatível do Object Storage (seção abaixo)                           |
+| `OCI_S3_REGION`                             | Região do bucket, ex. `sa-saopaulo-1`                                             |
+| `OCI_S3_BUCKET`                             | Bucket dos `.fit` originais, ex. `dutrail-fit-files`                              |
+| `OCI_S3_ACCESS_KEY` / `OCI_S3_SECRET_KEY`   | Customer Secret Key da Oracle (**segredo**: só no `.env`, nunca commitado)        |
 
 ```bash
 # gerar segredos
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 ```
+
+Com `NODE_ENV=production` o boot é mais rígido: `JWT_SECRET` e
+`JWT_REFRESH_SECRET` precisam de ≥ 43 caracteres (256 bits em base64url), e
+nenhuma credencial (`JWT_*`, `DATABASE_URL`, `GOOGLE_CLIENT_*`,
+`OCI_S3_ACCESS_KEY`/`OCI_S3_SECRET_KEY`) pode conter trechos dos placeholders do
+`.env.example` (`troque`, `change`, `example`, `xxx`, `secret`, `senha`, sem
+diferenciar maiúsculas). Em `development`/`test` valem só as regras de
+tamanho mínimo 32 e segredos diferentes. O erro diz qual variável falhou e por
+quê, sem mostrar o valor.
 
 ### 3. Credenciais do Google OAuth
 
@@ -154,6 +164,12 @@ npm run start:dev           # http://localhost:3000, docs em http://localhost:30
 Outros scripts: `prisma:deploy` (aplica migrations sem criar novas — use em
 produção/CI), `prisma:studio` (UI para inspecionar o banco), `build`,
 `start:prod`, `lint`, `format`.
+
+Os scripts definem o `NODE_ENV` (que vence o do `.env`): `start`, `start:dev`
+e `start:debug` usam `development`; `test*` usam `test`; `start:prod` usa
+`production` — ou seja, aplica as regras de produção acima e não sobe com os
+segredos de dev. Rodando `node dist/main` direto, defina `NODE_ENV` no
+ambiente ou no `.env`.
 
 ## Endpoints
 
