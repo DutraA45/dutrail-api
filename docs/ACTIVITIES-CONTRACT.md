@@ -6,6 +6,10 @@ verificado por [`test/activities.e2e-spec.ts`](../test/activities.e2e-spec.ts).
 A autenticação, o formato de erro e o interceptor estão em
 [`API-CONTRACT.md`](API-CONTRACT.md); a documentação interativa fica em `/docs`.
 
+> **Em produção, `/docs` e `/docs-json` não existem (404).** O Swagger só é
+> registrado com `NODE_ENV` diferente de `production`; em produção, este
+> documento é a referência.
+
 Estado desta etapa: listagem, detalhe e **criação por importação de arquivo
 `.fit`**. Edição e exclusão ainda não existem — ver
 [Lacunas conhecidas](#lacunas-conhecidas).

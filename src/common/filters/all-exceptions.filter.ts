@@ -33,8 +33,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const status = httpException.getStatus();
 
     if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+      // `path`, não `url`: a query string pode trazer credenciais (o `code` e
+      // o `state` do /auth/google/callback) e não deve chegar ao log.
       this.logger.error(
-        `${request.method} ${request.url} -> ${status}`,
+        `${request.method} ${request.path} -> ${status}`,
         exception instanceof Error ? exception.stack : String(exception),
       );
     }

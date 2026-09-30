@@ -33,7 +33,8 @@ guarda o original num object storage S3-compatível).
 | Upload        | multer (via `@nestjs/platform-express`), em memória     |
 | Arquivos .fit | `@garmin/fitsdk` (SDK oficial da Garmin)                |
 | Storage       | `@aws-sdk/client-s3` → Oracle Cloud Object Storage      |
-| Docs          | @nestjs/swagger em `/docs`                              |
+| Docs          | @nestjs/swagger em `/docs` (fora de produção)           |
+| Cabeçalhos    | helmet (HSTS, CSP, nosniff, Referrer-Policy)            |
 | Testes        | Vitest + Supertest                                      |
 
 ## Estrutura
@@ -41,7 +42,7 @@ guarda o original num object storage S3-compatível).
 ```
 src/
 ├── main.ts                 # bootstrap
-├── app.setup.ts            # pipes globais, CORS, Swagger (reusado nos e2e)
+├── app.setup.ts            # helmet, pipes globais, CORS, Swagger (reusado nos e2e)
 ├── app.module.ts           # ConfigModule, Throttler, filtro global de erros
 ├── config/env.validation.ts    # contrato + validação das variáveis de ambiente
 ├── prisma/                 # PrismaService (global)
@@ -81,7 +82,10 @@ test/fixtures/              # .fit sintético + gerador (build-fit.ts)
     docker compose up -d      # ou: podman compose up -d
     ```
     Sobe um Postgres 17 em `localhost:5433` com os bancos `dutrail` (dev) e
-    `dutrail_test` (e2e), usuário/senha `dutrail`/`dutrail`.
+    `dutrail_test` (e2e), usuário/senha `dutrail`/`dutrail`. É **só para
+    desenvolvimento**: a porta é publicada apenas em loopback (`127.0.0.1`),
+    não na rede local. A senha pode ser trocada com `POSTGRES_PASSWORD` no
+    ambiente (vale na criação do volume; o `.env.test` assume `dutrail`).
 
 ### 2. Instalar e configurar
 
@@ -92,24 +96,35 @@ cp .env.example .env        # edite os valores
 
 Variáveis principais (todas validadas no boot — ver `src/config/env.validation.ts`):
 
-| Variável                                    | Descrição                                                                   |
-| ------------------------------------------- | --------------------------------------------------------------------------- |
-| `DATABASE_URL`                              | Connection string do Postgres (Neon ou local)                               |
-| `JWT_SECRET` / `JWT_REFRESH_SECRET`         | Segredos **diferentes**, ≥ 32 chars. Gere com o comando abaixo              |
-| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`        | Expirações (`15m`, `7d`)                                                    |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                                            |
-| `GOOGLE_CALLBACK_URL`                       | `http://localhost:3000/auth/google/callback` em dev                         |
-| `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200` |
-| `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                  |
-| `OCI_S3_ENDPOINT`                           | Endpoint S3-compatível do Object Storage (seção abaixo)                     |
-| `OCI_S3_REGION`                             | Região do bucket, ex. `sa-saopaulo-1`                                       |
-| `OCI_S3_BUCKET`                             | Bucket dos `.fit` originais, ex. `dutrail-fit-files`                        |
-| `OCI_S3_ACCESS_KEY` / `OCI_S3_SECRET_KEY`   | Customer Secret Key da Oracle (**segredo**: só no `.env`, nunca commitado)  |
+| Variável                                    | Descrição                                                                         |
+| ------------------------------------------- | --------------------------------------------------------------------------------- |
+| `NODE_ENV`                                  | **Obrigatório**, sem default: `development`, `test` ou `production`               |
+| `DATABASE_URL`                              | Connection string do Postgres (Neon ou local)                                     |
+| `JWT_SECRET` / `JWT_REFRESH_SECRET`         | Segredos **diferentes**, ≥ 32 chars (≥ 43 em produção). Gere com o comando abaixo |
+| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`        | Expirações (`15m`, `7d`)                                                          |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                                                  |
+| `GOOGLE_CALLBACK_URL`                       | `http://localhost:3000/auth/google/callback` em dev                               |
+| `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200`       |
+| `COOKIE_SECURE`                             | Flag `Secure` do cookie do refresh (padrão `true`); `false` recusado em produção  |
+| `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                        |
+| `OCI_S3_ENDPOINT`                           | Endpoint S3-compatível do Object Storage (seção abaixo)                           |
+| `OCI_S3_REGION`                             | Região do bucket, ex. `sa-saopaulo-1`                                             |
+| `OCI_S3_BUCKET`                             | Bucket dos `.fit` originais, ex. `dutrail-fit-files`                              |
+| `OCI_S3_ACCESS_KEY` / `OCI_S3_SECRET_KEY`   | Customer Secret Key da Oracle (**segredo**: só no `.env`, nunca commitado)        |
 
 ```bash
 # gerar segredos
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 ```
+
+Com `NODE_ENV=production` o boot é mais rígido: `JWT_SECRET` e
+`JWT_REFRESH_SECRET` precisam de ≥ 43 caracteres (256 bits em base64url), e
+nenhuma credencial (`JWT_*`, `DATABASE_URL`, `GOOGLE_CLIENT_*`,
+`OCI_S3_ACCESS_KEY`/`OCI_S3_SECRET_KEY`) pode conter trechos dos placeholders do
+`.env.example` (`troque`, `change`, `example`, `xxx`, `secret`, `senha`, sem
+diferenciar maiúsculas). Em `development`/`test` valem só as regras de
+tamanho mínimo 32 e segredos diferentes. O erro diz qual variável falhou e por
+quê, sem mostrar o valor.
 
 ### 3. Credenciais do Google OAuth
 
@@ -155,10 +170,18 @@ Outros scripts: `prisma:deploy` (aplica migrations sem criar novas — use em
 produção/CI), `prisma:studio` (UI para inspecionar o banco), `build`,
 `start:prod`, `lint`, `format`.
 
+Os scripts definem o `NODE_ENV` (que vence o do `.env`): `start`, `start:dev`
+e `start:debug` usam `development`; `test*` usam `test`; `start:prod` usa
+`production` — ou seja, aplica as regras de produção acima e não sobe com os
+segredos de dev. Rodando `node dist/main` direto, defina `NODE_ENV` no
+ambiente ou no `.env`.
+
 ## Endpoints
 
 Documentação interativa (Swagger UI) em **`/docs`**; JSON OpenAPI em `/docs-json`.
-Nas rotas protegidas, clique em **Authorize** e cole o `accessToken`.
+Nas rotas protegidas, clique em **Authorize** e cole o `accessToken`. O Swagger
+só é registrado fora de produção: com `NODE_ENV=production`, `/docs`,
+`/docs-json` e `/docs-yaml` respondem 404.
 
 | Método | Rota                    | Auth          | `X-Client-Type` | Descrição                                                  |
 | ------ | ----------------------- | ------------- | --------------- | ---------------------------------------------------------- |
@@ -180,13 +203,13 @@ As rotas que emitem ou leem o refresh token exigem o header `X-Client-Type`,
 com valor `web` ou `mobile`. Ausente ou desconhecido → **400**; não há default
 silencioso, porque escolher um entregaria o token pelo canal errado.
 
-|                        | `web`                                                                                                  | `mobile`                                 |
-| ---------------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
-| Refresh token sai em   | Cookie `refreshToken` (httpOnly, `SameSite=Lax`, `Path=/auth`, `Secure` em produção, `Max-Age` 7 dias) | Corpo JSON                               |
-| Refresh token entra em | Cookie                                                                                                 | Corpo JSON (`{ "refreshToken": "..." }`) |
-| Corpo da resposta      | `accessToken` (+ `user`)                                                                               | `accessToken`, `refreshToken` (+ `user`) |
-| Token no canal errado  | 400                                                                                                    | 400                                      |
-| No logout              | Revoga no banco + `clearCookie`                                                                        | Revoga no banco                          |
+|                        | `web`                                                                                                | `mobile`                                 |
+| ---------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Refresh token sai em   | Cookie `refreshToken` (httpOnly, `SameSite=Lax`, `Path=/auth`, `Secure`, `Max-Age` = `exp` do token) | Corpo JSON                               |
+| Refresh token entra em | Cookie                                                                                               | Corpo JSON (`{ "refreshToken": "..." }`) |
+| Corpo da resposta      | `accessToken` (+ `user`)                                                                             | `accessToken`, `refreshToken` (+ `user`) |
+| Token no canal errado  | 400                                                                                                  | 400                                      |
+| No logout              | Revoga no banco + `clearCookie`                                                                      | Revoga no banco                          |
 
 Rotação, detecção de reuso e revogação são **idênticas** nos dois: a única
 diferença é o transporte (`RefreshTokenTransport`). O cliente web precisa de
@@ -239,6 +262,11 @@ do provedor. O fixture `test/fixtures/running.fit` é sintético, gerado pelo
 Encoder da Garmin, e não contém GPS. Para regenerá-lo, rode
 `node test/fixtures/build-fit.ts`.
 
+`test/swagger-by-env.e2e-spec.ts` sobe a app também com `NODE_ENV=development`
+e `production` (reimportando o `AppModule` com o ambiente trocado). Todas as
+variáveis vêm do `.env.test`, e em produção os segredos são gerados na hora,
+só para aquele processo.
+
 Para usar outro banco nos e2e (ex.: um branch do Neon no CI), exporte
 `DATABASE_URL` antes de rodar — variáveis do ambiente vencem o `.env.test`.
 
@@ -261,7 +289,8 @@ derrubar as outras sessões (um retry do cliente não deve deslogar o celular).
 
 - **Web usa cookie `httpOnly`**: JavaScript não consegue ler o token, então um
   XSS na SPA não o rouba. O escopo `Path=/auth` mantém o cookie fora das
-  chamadas normais da API, e `Secure` (em produção) o restringe a HTTPS.
+  chamadas normais da API, e `Secure` (padrão; ver `COOKIE_SECURE`) o
+  restringe a HTTPS.
 - **Mobile usa o corpo JSON**: app nativo não tem cookie jar de browser, e o
   token fica no armazenamento seguro do Android (Android Keystore protegendo
   os tokens, ex. DataStore criptografado).
@@ -299,6 +328,26 @@ contrário alguém poderia criar uma conta Google com o email de outra pessoa e
 sequestrar a conta local. Contas criadas via Google ficam com `passwordHash`
 nulo e recebem o mesmo 401 genérico se alguém tentar login por senha.
 
+Ao vincular por email, o resultado depende de a conta local já ter o email
+verificado:
+
+- **Email não verificado** (caso de todo signup por senha, porque ainda não
+  há verificação de email): nada garante que quem fez o cadastro era o dono do
+  email. Sem o descarte, quem cadastrou o email de outra pessoa com uma senha
+  própria continuaria entrando na conta depois que a dona a vinculasse ao
+  Google (_account pre-hijacking_, A-01 em
+  [docs/SECURITY-AUDIT.md](docs/SECURITY-AUDIT.md)). Por isso, numa
+  única transação, a conta **perde a senha** (`passwordHash` nulo, e
+  `hasPassword: false` na resposta) e **todas as sessões** (refresh tokens e
+  códigos de troca pendentes são apagados). A partir daí o login é só com
+  Google.
+- **Email já verificado**: a conta ganha o `googleId` e **mantém a senha** e
+  as sessões.
+
+Ainda não existe fluxo para definir uma senha nova: uma conta que perdeu a
+senha na vinculação só volta a ter login por senha quando houver reset de
+senha (ver Próximos passos).
+
 **Senhas.** Argon2id (parâmetros OWASP: 19 MiB, t=2, p=1). No login, quando o
 email não existe, ainda verificamos contra um hash "dummy" para a resposta
 demorar o mesmo tempo e não revelar por timing quais emails estão cadastrados.
@@ -310,6 +359,29 @@ por IP); erros 500 nunca expõem a mensagem original; `UserResponseDto` é um
 mapeamento explícito (whitelist) — campos novos na tabela não vazam por
 acidente; CORS com origem explícita e `credentials: true` (exigido pelo cookie,
 e incompatível com o wildcard `*`).
+
+**Cabeçalhos de segurança (helmet).** Toda resposta, inclusive 401/404,
+sai com:
+
+- `Strict-Transport-Security: max-age=31536000; includeSubDomains` (sem
+  `preload`). **A aplicação emite o HSTS.** Se o proxy reverso da VM também
+  emitir, tudo bem, desde que com o mesmo valor. Com dois headers HSTS na
+  resposta, o browser processa só o primeiro (RFC 6797 §8.1), e a política
+  efetiva passaria a depender da ordem em que o proxy insere o dele. O mais
+  simples é o proxy não adicionar o seu nem sobrescrever o da app.
+- CSP padrão do helmet com `frame-ancestors 'none'`, mais
+  `X-Frame-Options: DENY` para browsers antigos.
+- `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. Sem
+  `X-Powered-By`.
+- `Cross-Origin-Resource-Policy: same-origin` (padrão do helmet). O frontend
+  não é afetado: o browser só aplica o CORP a requests `no-cors` (`<img>`,
+  `<script>`), e o Angular chama a API com `fetch`/XHR em modo CORS.
+
+As rotas do Swagger (`/docs`, `/docs/*`, `/docs-json`), que só existem fora
+de produção, recebem a mesma CSP sem `upgrade-insecure-requests`. Em
+`http://localhost` essa diretiva mandaria os assets e o "Try it out" para
+`https://`. O resto da CSP basta para a UI: scripts vêm do próprio `/docs` e
+os `<style>` inline já são permitidos pela padrão.
 
 **Importação de `.fit`.** O dono vem sempre do token. O arquivo é validado
 pelo conteúdo (cabeçalho FIT + CRC), e não pela extensão, com teto de 10 MiB

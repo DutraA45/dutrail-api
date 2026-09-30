@@ -7,12 +7,18 @@ import {
 import { Prisma } from '../../generated/prisma/client.js';
 import { AllExceptionsFilter } from './all-exceptions.filter.js';
 
-function createHost() {
+function createHost(
+  req: { method: string; url: string; path: string } = {
+    method: 'POST',
+    url: '/auth/login',
+    path: '/auth/login',
+  },
+) {
   const response = { status: vi.fn().mockReturnThis(), json: vi.fn() };
   const host = {
     switchToHttp: () => ({
       getResponse: () => response,
-      getRequest: () => ({ method: 'POST', url: '/auth/login' }),
+      getRequest: () => req,
     }),
   } as unknown as ArgumentsHost;
   return { host, response };
@@ -22,9 +28,10 @@ describe('AllExceptionsFilter', () => {
   const filter = new AllExceptionsFilter();
 
   // O filtro loga erros 500 de propósito; não queremos o stack no output do teste.
-  beforeAll(() =>
-    vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined),
-  );
+  const logError = vi
+    .spyOn(Logger.prototype, 'error')
+    .mockImplementation(() => undefined);
+  beforeEach(() => logError.mockClear());
   afterAll(() => vi.restoreAllMocks());
 
   it('mantém status e mensagens de uma HttpException (ex.: validação)', () => {
@@ -67,6 +74,29 @@ describe('AllExceptionsFilter', () => {
     const body = response.json.mock.calls[0][0];
     expect(body.message).toBe('Internal server error');
     expect(JSON.stringify(body)).not.toContain('123');
+  });
+
+  it('loga o 5xx sem a query string (A-19: code/state do callback do Google)', () => {
+    // Como o Express monta a request: `url` com a query, `path` sem.
+    const { host } = createHost({
+      method: 'GET',
+      url: '/auth/google/callback?code=abc123&state=st4te987',
+      path: '/auth/google/callback',
+    });
+
+    filter.catch(new Error('falha inesperada'), host);
+
+    expect(logError).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(logError.mock.calls);
+    expect(logged).toContain('GET /auth/google/callback -> 500');
+    expect(logged).not.toContain('abc123');
+    expect(logged).not.toContain('st4te987');
+  });
+
+  it('não loga erros 4xx', () => {
+    const { host } = createHost();
+    filter.catch(new BadRequestException(), host);
+    expect(logError).not.toHaveBeenCalled();
   });
 
   it('usa o nome do status quando a exceção não traz "error"', () => {

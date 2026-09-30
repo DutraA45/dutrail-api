@@ -1,8 +1,10 @@
+import { Logger } from '@nestjs/common';
 import request from 'supertest';
 import { fakeGoogle, makeGoogleProfile } from './fakes/fake-google.strategy.js';
 import {
   CLIENT_TYPES,
   createClient,
+  expectMaxAgeMatchesToken,
   sentCookies,
   setCookie,
   setCookieRaw,
@@ -247,16 +249,19 @@ describe('Transporte do refresh token: regras de canal (e2e)', () => {
       .expect(201);
   }
 
-  it('web: cookie com HttpOnly, Path=/auth, SameSite=Lax e maxAge de 7 dias', async () => {
+  it('web: cookie com HttpOnly, Path=/auth, SameSite=Lax e Max-Age do token emitido', async () => {
     const res = await signupAs('web');
     const cookie = setCookieRaw(res)!;
 
     expect(cookie).toContain('HttpOnly');
     expect(cookie).toContain('Path=/auth');
     expect(cookie).toMatch(/SameSite=Lax/i);
-    expect(cookie).toContain(`Max-Age=${7 * 24 * 60 * 60}`);
-    // NODE_ENV=test -> sem Secure, senão o cookie não sobreviveria em http://.
-    expect(cookie).not.toContain('Secure');
+    // JWT_REFRESH_TTL=7d no .env.test.
+    expectMaxAgeMatchesToken(res, 7 * 24 * 60 * 60);
+    // O .env.test desliga o Secure (COOKIE_SECURE=false): o cookie jar do
+    // supertest não reenviaria um cookie Secure em http://. O padrão (Secure
+    // ligado) é coberto em refresh-cookie-by-env.e2e-spec.ts.
+    expect(cookie).not.toMatch(/;\s*Secure/i);
   });
 
   it('web: 400 se o refresh token vier no corpo (canal errado)', async () => {
@@ -306,6 +311,8 @@ describe('Transporte do refresh token: regras de canal (e2e)', () => {
     expect(cleared).toMatch(/^refreshToken=;/);
     expect(cleared).toContain('Path=/auth');
     expect(cleared).toContain('HttpOnly');
+    expect(cleared).toMatch(/SameSite=Lax/i);
+    expect(cleared).not.toMatch(/;\s*Secure/i); // igual ao set (COOKIE_SECURE=false)
     expect(cleared).toContain('Expires=Thu, 01 Jan 1970');
   });
 
@@ -499,30 +506,127 @@ describe('Rotas independentes do client type (e2e)', () => {
     await c.post('/auth/google/exchange').send({ code: 'curto' }).expect(400);
   });
 
-  it('vincula a conta Google a um usuário existente com o mesmo email', async () => {
-    const c = mobile();
-    await c.post('/auth/signup').send(credentials).expect(201);
-
-    fakeGoogle.profile = makeGoogleProfile({
-      email: 'Ana@Example.com',
-      id: 'google-id-ana',
-    });
+  /** Callback do Google (strategy falsa) + troca do código pelo cliente. */
+  async function loginWithGoogle(
+    c: TestClient,
+    profile: Parameters<typeof makeGoogleProfile>[0],
+  ) {
+    fakeGoogle.profile = makeGoogleProfile(profile);
     const callback = await http()
       .get('/auth/google/callback?code=google-code')
       .expect(302);
     const code = new URL(callback.headers.location).searchParams.get('code')!;
-    const res = await c
-      .post('/auth/google/exchange')
-      .send({ code })
-      .expect(200);
+    return c.post('/auth/google/exchange').send({ code }).expect(200);
+  }
 
+  it('vincula a conta Google a um usuário existente com o mesmo email', async () => {
+    const c = mobile();
+    await c.post('/auth/signup').send(credentials).expect(201);
+
+    const res = await loginWithGoogle(c, {
+      email: 'Ana@Example.com',
+      id: 'google-id-ana',
+    });
+
+    // O signup não verifica o email, então a senha cadastrada é descartada
+    // na vinculação (A-01): a conta vira só-Google.
     expect(res.body.user).toMatchObject({
       email: 'ana@example.com',
       name: 'Ana',
       emailVerified: true,
-      hasPassword: true,
+      hasPassword: false,
     });
     expect(await t.prisma.user.count()).toBe(1);
+  });
+
+  it('pre-hijacking (A-01): quem cadastrou o email antes perde senha e sessões quando o dono entra com Google', async () => {
+    // Atacante cadastra o email da vítima com uma senha própria.
+    const attacker = mobile();
+    const signup = await attacker
+      .post('/auth/signup')
+      .send(credentials)
+      .expect(201);
+    const signupToken = attacker.refreshTokenOf(signup)!;
+    const login = await attacker
+      .post('/auth/login')
+      .send(loginBody)
+      .expect(200);
+    const loginToken = attacker.refreshTokenOf(login)!;
+    const userId = signup.body.user.id as string;
+
+    // Código de troca pendente de antes da vinculação: também deve cair.
+    await t.prisma.oAuthExchangeCode.create({
+      data: {
+        codeHash: 'f'.repeat(64),
+        userId,
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+
+    // A dona real do email entra com Google (email verificado).
+    const victim = mobile();
+    const linked = await loginWithGoogle(victim, {
+      email: credentials.email,
+      id: 'google-id-ana',
+    });
+    expect(linked.body.user).toMatchObject({
+      id: userId,
+      emailVerified: true,
+      hasPassword: false,
+    });
+
+    // A senha do atacante não vale mais...
+    const denied = await attacker
+      .post('/auth/login')
+      .send(loginBody)
+      .expect(401);
+    expect(denied.body.message).toBe('Invalid credentials');
+
+    // ...nem os refresh tokens emitidos antes da vinculação. São "não
+    // encontrados", não "reuso": o atacante não consegue derrubar as sessões
+    // da vítima reapresentando-os.
+    for (const token of [signupToken, loginToken]) {
+      const res = await attacker.refreshWith(token).expect(401);
+      expect(res.body.message).toBe('Invalid refresh token');
+    }
+    expect(
+      await t.prisma.oAuthExchangeCode.count({
+        where: { codeHash: 'f'.repeat(64) },
+      }),
+    ).toBe(0);
+
+    // A sessão da vítima segue válida, e ela volta a entrar com Google.
+    await victim.refresh(victim.refreshTokenOf(linked)!).expect(200);
+    const again = await loginWithGoogle(mobile(), {
+      email: credentials.email,
+      id: 'google-id-ana',
+    });
+    expect(again.body.user).toMatchObject({ id: userId, hasPassword: false });
+    expect(await t.prisma.user.count()).toBe(1);
+  });
+
+  it('vincular conta com email já verificado mantém a senha e as sessões', async () => {
+    const c = mobile();
+    const signup = await c.post('/auth/signup').send(credentials).expect(201);
+    const signupToken = c.refreshTokenOf(signup)!;
+    // Não há fluxo de verificação de email ainda: marca direto no banco.
+    await t.prisma.user.update({
+      where: { email: credentials.email },
+      data: { emailVerified: true },
+    });
+
+    const res = await loginWithGoogle(mobile(), {
+      email: credentials.email,
+      id: 'google-id-ana',
+    });
+
+    expect(res.body.user).toMatchObject({
+      email: 'ana@example.com',
+      emailVerified: true,
+      hasPassword: true,
+    });
+    await c.post('/auth/login').send(loginBody).expect(200);
+    await c.refreshWith(signupToken).expect(200);
   });
 
   it('recusa vincular quando o Google não verificou o email', async () => {
@@ -567,6 +671,26 @@ describe('Rotas independentes do client type (e2e)', () => {
       data: { expiresAt: new Date(Date.now() - 1000) },
     });
     await c.post('/auth/google/exchange').send({ code: expiring }).expect(401);
+  });
+
+  it('A-19: o log de um 5xx no callback do Google não leva a query string (code/state)', async () => {
+    // Sem perfil configurado, a strategy falsa falha com um Error comum: 500.
+    const logError = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    try {
+      await http()
+        .get('/auth/google/callback?code=abc123&state=st4te987')
+        .expect(500);
+
+      expect(logError).toHaveBeenCalled();
+      const logged = JSON.stringify(logError.mock.calls);
+      expect(logged).toContain('GET /auth/google/callback -> 500');
+      expect(logged).not.toContain('abc123');
+      expect(logged).not.toContain('st4te987');
+    } finally {
+      logError.mockRestore();
+    }
   });
 
   describe('Swagger', () => {

@@ -41,6 +41,11 @@ describe('AuthService', () => {
   };
   let prisma: {
     oAuthExchangeCode: { create: any; findUnique: any; updateMany: any };
+    $transaction: any;
+  };
+  let tx: {
+    refreshToken: { deleteMany: any };
+    oAuthExchangeCode: { deleteMany: any };
   };
 
   beforeEach(async () => {
@@ -65,6 +70,12 @@ describe('AuthService', () => {
         findUnique: vi.fn(),
         updateMany: vi.fn(),
       },
+      // Roda o callback com um cliente de transação falso.
+      $transaction: vi.fn((fn: (client: typeof tx) => unknown) => fn(tx)),
+    };
+    tx = {
+      refreshToken: { deleteMany: vi.fn() },
+      oAuthExchangeCode: { deleteMany: vi.fn() },
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -186,9 +197,13 @@ describe('AuthService', () => {
       expect(users.create).not.toHaveBeenCalled();
     });
 
-    it('vincula a conta Google a um usuário existente com o mesmo email', async () => {
+    it('vincula a conta Google a um usuário verificado mantendo a senha', async () => {
       users.findByGoogleId.mockResolvedValue(null);
-      const existing = makeUser({ name: 'Ana', avatarUrl: null });
+      const existing = makeUser({
+        name: 'Ana',
+        avatarUrl: null,
+        emailVerified: true,
+      });
       users.findByEmail.mockResolvedValue(existing);
       const linked = makeUser({ googleId: 'g-123', emailVerified: true });
       users.linkGoogleAccount.mockResolvedValue(linked);
@@ -200,7 +215,47 @@ describe('AuthService', () => {
         name: 'Ana',
         avatarUrl: 'https://img/ana.png',
       });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
       expect(users.create).not.toHaveBeenCalled();
+    });
+
+    it('conta com email não verificado: descarta senha e sessões na mesma transação (A-01)', async () => {
+      users.findByGoogleId.mockResolvedValue(null);
+      users.findByEmail.mockResolvedValue(
+        makeUser({ name: 'Ana', avatarUrl: null, emailVerified: false }),
+      );
+      const linked = makeUser({
+        googleId: 'g-123',
+        emailVerified: true,
+        passwordHash: null,
+      });
+      users.linkGoogleAccount.mockResolvedValue(linked);
+
+      await expect(service.loginWithGoogle(profile)).resolves.toBe(linked);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(tx.refreshToken.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+      });
+      expect(tx.oAuthExchangeCode.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+      });
+      expect(users.linkGoogleAccount).toHaveBeenCalledWith(
+        'user-1',
+        {
+          googleId: 'g-123',
+          name: 'Ana',
+          avatarUrl: 'https://img/ana.png',
+          discardPassword: true,
+        },
+        tx,
+      );
+      // Sessões caem antes da vinculação.
+      expect(
+        tx.refreshToken.deleteMany.mock.invocationCallOrder[0],
+      ).toBeLessThan(users.linkGoogleAccount.mock.invocationCallOrder[0]);
+      expect(
+        tx.oAuthExchangeCode.deleteMany.mock.invocationCallOrder[0],
+      ).toBeLessThan(users.linkGoogleAccount.mock.invocationCallOrder[0]);
     });
 
     it('NÃO vincula se o Google não verificou o email (evita sequestro de conta)', async () => {

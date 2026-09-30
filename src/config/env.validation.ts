@@ -1,5 +1,6 @@
-import { plainToInstance } from 'class-transformer';
+import { plainToInstance, Transform } from 'class-transformer';
 import {
+  IsBoolean,
   IsEnum,
   IsInt,
   IsNotEmpty,
@@ -25,8 +26,12 @@ export enum NodeEnv {
  * dando autocomplete e tipagem nos `config.get(...)`.
  */
 export class EnvironmentVariables {
-  @IsEnum(NodeEnv)
-  NODE_ENV: NodeEnv = NodeEnv.Development;
+  // Sem default de propósito: esquecer o NODE_ENV em produção não pode cair
+  // silenciosamente em "development" (cookie sem Secure, Swagger exposto).
+  @IsEnum(NodeEnv, {
+    message: `NODE_ENV é obrigatório e deve ser um de: ${Object.values(NodeEnv).join(', ')}`,
+  })
+  NODE_ENV: NodeEnv;
 
   @IsInt()
   @Min(0)
@@ -35,11 +40,19 @@ export class EnvironmentVariables {
   @IsUrl({ require_tld: false })
   FRONTEND_URL: string;
 
+  // Flag Secure do cookie do refresh token (fluxo web). Ligada por padrão e
+  // independente de NODE_ENV; desligar só serve para dev em http:// num
+  // browser que recusa Secure fora de HTTPS (Safari). Proibido em produção.
+  @Transform(({ obj, key }) => parseBooleanFlag(obj[key]))
+  @IsBoolean({ message: 'COOKIE_SECURE deve ser "true" ou "false"' })
+  COOKIE_SECURE: boolean = true;
+
   @IsString()
   @IsNotEmpty()
   DATABASE_URL: string;
 
-  // Segredos curtos tornam o JWT (HS256) vulnerável a força bruta.
+  // Segredos curtos tornam o JWT (HS256) vulnerável a força bruta. Em
+  // produção a exigência é maior (ver checkProductionCredentials).
   @IsString()
   @MinLength(32)
   JWT_SECRET: string;
@@ -98,6 +111,77 @@ export class EnvironmentVariables {
 }
 
 /**
+ * Trechos dos valores de exemplo do `.env.example`. Em produção, uma credencial
+ * que contenha qualquer um deles é quase certamente o placeholder copiado —
+ * e o placeholder é público no repositório. Comparação sem diferenciar
+ * maiúsculas.
+ */
+export const PLACEHOLDER_FRAGMENTS = [
+  'troque',
+  'change',
+  'example',
+  'xxx',
+  'secret',
+  'senha',
+] as const;
+
+/** 256 bits em base64url (32 bytes -> 43 caracteres). */
+export const PRODUCTION_JWT_SECRET_MIN_LENGTH = 43;
+
+const JWT_SECRETS = ['JWT_SECRET', 'JWT_REFRESH_SECRET'] as const;
+
+/** Credenciais que têm placeholder no `.env.example`. */
+const PLACEHOLDER_CHECKED_CREDENTIALS = [
+  ...JWT_SECRETS,
+  'DATABASE_URL',
+  'GOOGLE_CLIENT_ID',
+  'GOOGLE_CLIENT_SECRET',
+  'OCI_S3_ACCESS_KEY',
+  'OCI_S3_SECRET_KEY',
+] as const;
+
+/**
+ * Regras extras de produção. Em development/test valem só as do decorator
+ * (os valores locais são frases legíveis, aceitáveis fora de produção).
+ * As mensagens nunca incluem o valor da variável.
+ */
+function checkProductionCredentials(env: EnvironmentVariables): string[] {
+  const problems: string[] = [];
+
+  for (const name of JWT_SECRETS) {
+    if (env[name].length < PRODUCTION_JWT_SECRET_MIN_LENGTH) {
+      problems.push(
+        `${name} precisa ter pelo menos ${PRODUCTION_JWT_SECRET_MIN_LENGTH} caracteres em produção (256 bits em base64url)`,
+      );
+    }
+  }
+
+  for (const name of PLACEHOLDER_CHECKED_CREDENTIALS) {
+    const value = env[name].toLowerCase();
+    const fragment = PLACEHOLDER_FRAGMENTS.find((f) => value.includes(f));
+    if (fragment) {
+      problems.push(
+        `${name} contém o trecho de placeholder "${fragment}" (valor do .env.example?); em produção use a credencial real`,
+      );
+    }
+  }
+
+  return problems;
+}
+
+/**
+ * A conversão implícita faria `Boolean("false") === true`; aqui só "true" e
+ * "false" viram booleano. Qualquer outro valor passa adiante e o @IsBoolean
+ * o recusa.
+ */
+function parseBooleanFlag(raw: unknown): unknown {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : raw;
+  if (value === 'true' || value === true) return true;
+  if (value === 'false' || value === false) return false;
+  return raw;
+}
+
+/**
  * Função plugada em `ConfigModule.forRoot({ validate })`. Recebe o
  * process.env cru (tudo string), converte para a classe acima e valida.
  */
@@ -111,19 +195,43 @@ export function validateEnv(
     exposeDefaultValues: true,
   });
 
-  const errors = validateSync(env, { skipMissingProperties: false });
+  const errors = validateSync(env, {
+    skipMissingProperties: false,
+    // Os erros não carregam o valor nem o objeto: nada de segredo em log.
+    validationError: { target: false, value: false },
+  });
   if (errors.length > 0) {
-    const details = errors
-      .map((e) => Object.values(e.constraints ?? {}).join(', '))
-      .join('\n  - ');
-    throw new Error(`Variáveis de ambiente inválidas:\n  - ${details}`);
+    throw invalidEnvError(
+      errors.map((e) => Object.values(e.constraints ?? {}).join(', ')),
+    );
   }
+
+  const problems: string[] = [];
 
   // Usar o mesmo segredo para os dois tokens permitiria apresentar um refresh
   // token como access token (e vice-versa).
   if (env.JWT_SECRET === env.JWT_REFRESH_SECRET) {
-    throw new Error('JWT_SECRET e JWT_REFRESH_SECRET precisam ser diferentes');
+    problems.push('JWT_SECRET e JWT_REFRESH_SECRET precisam ser diferentes');
+  }
+
+  if (env.NODE_ENV === NodeEnv.Production) {
+    problems.push(...checkProductionCredentials(env));
+    if (!env.COOKIE_SECURE) {
+      problems.push(
+        'COOKIE_SECURE não pode ser desligado em produção: sem a flag Secure o refresh token trafegaria também por HTTP',
+      );
+    }
+  }
+
+  if (problems.length > 0) {
+    throw invalidEnvError(problems);
   }
 
   return env;
+}
+
+function invalidEnvError(details: string[]): Error {
+  return new Error(
+    `Variáveis de ambiente inválidas:\n  - ${details.join('\n  - ')}`,
+  );
 }

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
-import type { User } from '../generated/prisma/client.js';
+import type { Prisma, User } from '../generated/prisma/client.js';
 
 export interface CreateUserInput {
   email: string;
@@ -48,16 +48,26 @@ export class UsersService {
   /**
    * Vincula uma conta Google a um usuário existente (mesmo email).
    * O Google já verificou o email, então marcamos `emailVerified`.
+   *
+   * `discardPassword` zera o `passwordHash` (a conta passa a ser só-Google).
+   * `db` permite rodar o update dentro de uma `$transaction` do chamador.
    */
   linkGoogleAccount(
     userId: string,
-    data: { googleId: string; name?: string; avatarUrl?: string },
+    data: {
+      googleId: string;
+      name?: string;
+      avatarUrl?: string;
+      discardPassword?: boolean;
+    },
+    db: Prisma.TransactionClient = this.prisma,
   ): Promise<User> {
-    return this.prisma.user.update({
+    return db.user.update({
       where: { id: userId },
       data: {
         googleId: data.googleId,
         emailVerified: true,
+        passwordHash: data.discardPassword ? null : undefined,
         // Só preenche nome/avatar se o usuário ainda não tinha.
         name: data.name === undefined ? undefined : { set: data.name },
         avatarUrl:
