@@ -53,6 +53,28 @@ export function setCookieRaw(
 }
 
 /**
+ * O `Max-Age` do cookie de refresh acompanha o `exp` do token que ele carrega
+ * (A-11): igual ao tempo restante até o `exp`, com folga de arredondamento, e
+ * nunca maior que o TTL configurado.
+ */
+export function expectMaxAgeMatchesToken(res: Response, ttlSeconds: number) {
+  const cookie = setCookieRaw(res);
+  const token = setCookie(res);
+  expect(cookie).toBeDefined();
+  expect(token).toBeDefined();
+
+  const maxAge = Number(/Max-Age=(\d+)/.exec(cookie!)?.[1]);
+  const { exp } = JSON.parse(
+    Buffer.from(token!.split('.')[1], 'base64url').toString(),
+  ) as { exp: number };
+  const remaining = exp - Date.now() / 1000;
+
+  expect(Math.abs(maxAge - remaining)).toBeLessThanOrEqual(2);
+  expect(maxAge).toBeLessThanOrEqual(ttlSeconds);
+  expect(maxAge).toBeGreaterThan(ttlSeconds - 60);
+}
+
+/**
  * Cookies que o agent REALMENTE enviou nesta request (o cookie jar aplica o
  * Path, então isso comprova se o cookie acompanhou ou não a rota).
  */

@@ -168,11 +168,7 @@ export class AuthController {
     }
 
     const tokens = await this.authService.refresh(refreshToken);
-    const bodyToken = this.transport.deliver(
-      clientType,
-      res,
-      tokens.refreshToken,
-    );
+    const bodyToken = this.transport.deliver(clientType, res, tokens);
 
     return bodyToken === undefined
       ? AccessTokenDto.fromTokens(tokens)
@@ -292,11 +288,7 @@ export class AuthController {
     clientType: ClientType,
     res: Response,
   ): AuthWebResponseDto | AuthMobileResponseDto {
-    const bodyToken = this.transport.deliver(
-      clientType,
-      res,
-      result.refreshToken,
-    );
+    const bodyToken = this.transport.deliver(clientType, res, result);
     return bodyToken === undefined
       ? AuthWebResponseDto.fromResult(result)
       : AuthMobileResponseDto.fromResult(result);

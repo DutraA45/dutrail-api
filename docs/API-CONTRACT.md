@@ -48,7 +48,7 @@ de browser, que não permite headers customizados).
 | Configuração do cliente        | `withCredentials: true` em todas as chamadas                                                    | Nada (sem cookies)                                                                                   |
 | Corpo de signup/login/exchange | `{ accessToken, user }`                                                                         | `{ accessToken, refreshToken, user }`                                                                |
 | Corpo de `/auth/refresh`       | `{ accessToken }`                                                                               | `{ accessToken, refreshToken }`                                                                      |
-| `Set-Cookie` na resposta       | `refreshToken=...; Max-Age=604800; Path=/auth; HttpOnly; SameSite=Lax` (+ `Secure` em produção) | nunca                                                                                                |
+| `Set-Cookie` na resposta       | `refreshToken=...; Max-Age=<validade do token (s)>; Path=/auth; HttpOnly; Secure; SameSite=Lax` | nunca                                                                                                |
 | Enviar o refresh token         | Automático (cookie); corpo deve ficar **vazio**                                                 | `{ "refreshToken": "eyJ..." }` no corpo                                                              |
 | Token no canal errado          | Corpo preenchido → **400**                                                                      | Cookie `refreshToken` presente → **400**                                                             |
 | Logout                         | Revoga no banco + apaga o cookie (`Set-Cookie: refreshToken=; Expires=1970`)                    | Revoga no banco                                                                                      |
@@ -94,10 +94,17 @@ cliente passar um período inteiro de `JWT_REFRESH_TTL` sem renovar, ou se for
 revogada (logout ou detecção de reuso). Por isso o cliente não precisa agendar
 renovação: basta renovar ao receber 401 (ver [Interceptor](#interceptor)).
 
-No fluxo web, o `Max-Age` do cookie é fixo em 7 dias no código
-(`REFRESH_COOKIE_MAX_AGE_MS`) e **não** acompanha `JWT_REFRESH_TTL`. Se a
-variável for alterada, a validade real continua sendo a do token (verificada no
-servidor), mas o browser descarta o cookie após 7 dias.
+No fluxo web, o `Max-Age` do cookie acompanha a validade real do refresh token
+emitido (o `exp` do JWT, que segue `JWT_REFRESH_TTL`): o browser descarta o
+cookie quando o token expira, e cada `/auth/refresh` renova os dois. Com o
+padrão de 7 dias, `Max-Age` fica em torno de 604800, normalmente um pouco
+abaixo (conta o tempo restante até o `exp`, em segundos inteiros).
+
+O cookie sai com `Secure` por padrão, ou seja, o browser só o envia por HTTPS.
+A exceção é o desenvolvimento local em `http://` com Safari, que recusa cookie
+`Secure` fora de HTTPS (Chrome e Firefox o aceitam em `http://localhost`): o
+servidor omite a flag se `COOKIE_SECURE=false`, configuração que o boot recusa
+em produção.
 
 ## Endpoints
 
@@ -127,7 +134,7 @@ X-Client-Type: web
 
 ```http
 HTTP/1.1 200 OK
-Set-Cookie: refreshToken=eyJhbGciOi...; Max-Age=604800; Path=/auth; HttpOnly; SameSite=Lax
+Set-Cookie: refreshToken=eyJhbGciOi...; Max-Age=604800; Path=/auth; HttpOnly; Secure; SameSite=Lax
 
 { "accessToken": "eyJhbGciOiJIUzI1NiJ9...", "user": { ... } }
 ```
@@ -138,7 +145,7 @@ X-Client-Type: web
 Cookie: refreshToken=eyJhbGciOi...        ← o browser envia sozinho
 
 HTTP/1.1 200 OK
-Set-Cookie: refreshToken=<novo>; Max-Age=604800; Path=/auth; HttpOnly; SameSite=Lax
+Set-Cookie: refreshToken=<novo>; Max-Age=604800; Path=/auth; HttpOnly; Secure; SameSite=Lax
 
 { "accessToken": "eyJ..." }
 ```

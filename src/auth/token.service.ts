@@ -13,6 +13,8 @@ import type {
 export interface TokenPair {
   accessToken: string;
   refreshToken: string;
+  /** `exp` do refresh token emitido; o mesmo prazo gravado no banco. */
+  refreshTokenExpiresAt: Date;
 }
 
 /**
@@ -68,15 +70,16 @@ export class TokenService {
 
     // Lê o `exp` calculado pelo jsonwebtoken em vez de parsear "7d" de novo.
     const { exp } = this.jwt.decode<{ exp: number }>(refreshToken);
+    const refreshTokenExpiresAt = new Date(exp * 1000);
     await this.prisma.refreshToken.create({
       data: {
         tokenHash: TokenService.hashToken(refreshToken),
         userId: user.id,
-        expiresAt: new Date(exp * 1000),
+        expiresAt: refreshTokenExpiresAt,
       },
     });
 
-    return { accessToken, refreshToken };
+    return { accessToken, refreshToken, refreshTokenExpiresAt };
   }
 
   /**

@@ -82,7 +82,10 @@ test/fixtures/              # .fit sintético + gerador (build-fit.ts)
     docker compose up -d      # ou: podman compose up -d
     ```
     Sobe um Postgres 17 em `localhost:5433` com os bancos `dutrail` (dev) e
-    `dutrail_test` (e2e), usuário/senha `dutrail`/`dutrail`.
+    `dutrail_test` (e2e), usuário/senha `dutrail`/`dutrail`. É **só para
+    desenvolvimento**: a porta é publicada apenas em loopback (`127.0.0.1`),
+    não na rede local. A senha pode ser trocada com `POSTGRES_PASSWORD` no
+    ambiente (vale na criação do volume; o `.env.test` assume `dutrail`).
 
 ### 2. Instalar e configurar
 
@@ -102,6 +105,7 @@ Variáveis principais (todas validadas no boot — ver `src/config/env.validatio
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                                                  |
 | `GOOGLE_CALLBACK_URL`                       | `http://localhost:3000/auth/google/callback` em dev                               |
 | `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200`       |
+| `COOKIE_SECURE`                             | Flag `Secure` do cookie do refresh (padrão `true`); `false` recusado em produção  |
 | `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                        |
 | `OCI_S3_ENDPOINT`                           | Endpoint S3-compatível do Object Storage (seção abaixo)                           |
 | `OCI_S3_REGION`                             | Região do bucket, ex. `sa-saopaulo-1`                                             |
@@ -199,13 +203,13 @@ As rotas que emitem ou leem o refresh token exigem o header `X-Client-Type`,
 com valor `web` ou `mobile`. Ausente ou desconhecido → **400**; não há default
 silencioso, porque escolher um entregaria o token pelo canal errado.
 
-|                        | `web`                                                                                                  | `mobile`                                 |
-| ---------------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
-| Refresh token sai em   | Cookie `refreshToken` (httpOnly, `SameSite=Lax`, `Path=/auth`, `Secure` em produção, `Max-Age` 7 dias) | Corpo JSON                               |
-| Refresh token entra em | Cookie                                                                                                 | Corpo JSON (`{ "refreshToken": "..." }`) |
-| Corpo da resposta      | `accessToken` (+ `user`)                                                                               | `accessToken`, `refreshToken` (+ `user`) |
-| Token no canal errado  | 400                                                                                                    | 400                                      |
-| No logout              | Revoga no banco + `clearCookie`                                                                        | Revoga no banco                          |
+|                        | `web`                                                                                                | `mobile`                                 |
+| ---------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Refresh token sai em   | Cookie `refreshToken` (httpOnly, `SameSite=Lax`, `Path=/auth`, `Secure`, `Max-Age` = `exp` do token) | Corpo JSON                               |
+| Refresh token entra em | Cookie                                                                                               | Corpo JSON (`{ "refreshToken": "..." }`) |
+| Corpo da resposta      | `accessToken` (+ `user`)                                                                             | `accessToken`, `refreshToken` (+ `user`) |
+| Token no canal errado  | 400                                                                                                  | 400                                      |
+| No logout              | Revoga no banco + `clearCookie`                                                                      | Revoga no banco                          |
 
 Rotação, detecção de reuso e revogação são **idênticas** nos dois: a única
 diferença é o transporte (`RefreshTokenTransport`). O cliente web precisa de
@@ -285,7 +289,8 @@ derrubar as outras sessões (um retry do cliente não deve deslogar o celular).
 
 - **Web usa cookie `httpOnly`**: JavaScript não consegue ler o token, então um
   XSS na SPA não o rouba. O escopo `Path=/auth` mantém o cookie fora das
-  chamadas normais da API, e `Secure` (em produção) o restringe a HTTPS.
+  chamadas normais da API, e `Secure` (padrão; ver `COOKIE_SECURE`) o
+  restringe a HTTPS.
 - **Mobile usa o corpo JSON**: app nativo não tem cookie jar de browser, e o
   token fica no armazenamento seguro do Android (Android Keystore protegendo
   os tokens, ex. DataStore criptografado).

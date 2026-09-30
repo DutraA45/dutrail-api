@@ -1,8 +1,10 @@
+import { Logger } from '@nestjs/common';
 import request from 'supertest';
 import { fakeGoogle, makeGoogleProfile } from './fakes/fake-google.strategy.js';
 import {
   CLIENT_TYPES,
   createClient,
+  expectMaxAgeMatchesToken,
   sentCookies,
   setCookie,
   setCookieRaw,
@@ -247,16 +249,19 @@ describe('Transporte do refresh token: regras de canal (e2e)', () => {
       .expect(201);
   }
 
-  it('web: cookie com HttpOnly, Path=/auth, SameSite=Lax e maxAge de 7 dias', async () => {
+  it('web: cookie com HttpOnly, Path=/auth, SameSite=Lax e Max-Age do token emitido', async () => {
     const res = await signupAs('web');
     const cookie = setCookieRaw(res)!;
 
     expect(cookie).toContain('HttpOnly');
     expect(cookie).toContain('Path=/auth');
     expect(cookie).toMatch(/SameSite=Lax/i);
-    expect(cookie).toContain(`Max-Age=${7 * 24 * 60 * 60}`);
-    // NODE_ENV=test -> sem Secure, senão o cookie não sobreviveria em http://.
-    expect(cookie).not.toContain('Secure');
+    // JWT_REFRESH_TTL=7d no .env.test.
+    expectMaxAgeMatchesToken(res, 7 * 24 * 60 * 60);
+    // O .env.test desliga o Secure (COOKIE_SECURE=false): o cookie jar do
+    // supertest não reenviaria um cookie Secure em http://. O padrão (Secure
+    // ligado) é coberto em refresh-cookie-by-env.e2e-spec.ts.
+    expect(cookie).not.toMatch(/;\s*Secure/i);
   });
 
   it('web: 400 se o refresh token vier no corpo (canal errado)', async () => {
@@ -306,6 +311,8 @@ describe('Transporte do refresh token: regras de canal (e2e)', () => {
     expect(cleared).toMatch(/^refreshToken=;/);
     expect(cleared).toContain('Path=/auth');
     expect(cleared).toContain('HttpOnly');
+    expect(cleared).toMatch(/SameSite=Lax/i);
+    expect(cleared).not.toMatch(/;\s*Secure/i); // igual ao set (COOKIE_SECURE=false)
     expect(cleared).toContain('Expires=Thu, 01 Jan 1970');
   });
 
@@ -664,6 +671,26 @@ describe('Rotas independentes do client type (e2e)', () => {
       data: { expiresAt: new Date(Date.now() - 1000) },
     });
     await c.post('/auth/google/exchange').send({ code: expiring }).expect(401);
+  });
+
+  it('A-19: o log de um 5xx no callback do Google não leva a query string (code/state)', async () => {
+    // Sem perfil configurado, a strategy falsa falha com um Error comum: 500.
+    const logError = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    try {
+      await http()
+        .get('/auth/google/callback?code=abc123&state=st4te987')
+        .expect(500);
+
+      expect(logError).toHaveBeenCalled();
+      const logged = JSON.stringify(logError.mock.calls);
+      expect(logged).toContain('GET /auth/google/callback -> 500');
+      expect(logged).not.toContain('abc123');
+      expect(logged).not.toContain('st4te987');
+    } finally {
+      logError.mockRestore();
+    }
   });
 
   describe('Swagger', () => {

@@ -1,5 +1,6 @@
-import { plainToInstance } from 'class-transformer';
+import { plainToInstance, Transform } from 'class-transformer';
 import {
+  IsBoolean,
   IsEnum,
   IsInt,
   IsNotEmpty,
@@ -38,6 +39,13 @@ export class EnvironmentVariables {
 
   @IsUrl({ require_tld: false })
   FRONTEND_URL: string;
+
+  // Flag Secure do cookie do refresh token (fluxo web). Ligada por padrão e
+  // independente de NODE_ENV; desligar só serve para dev em http:// num
+  // browser que recusa Secure fora de HTTPS (Safari). Proibido em produção.
+  @Transform(({ obj, key }) => parseBooleanFlag(obj[key]))
+  @IsBoolean({ message: 'COOKIE_SECURE deve ser "true" ou "false"' })
+  COOKIE_SECURE: boolean = true;
 
   @IsString()
   @IsNotEmpty()
@@ -162,6 +170,18 @@ function checkProductionCredentials(env: EnvironmentVariables): string[] {
 }
 
 /**
+ * A conversão implícita faria `Boolean("false") === true`; aqui só "true" e
+ * "false" viram booleano. Qualquer outro valor passa adiante e o @IsBoolean
+ * o recusa.
+ */
+function parseBooleanFlag(raw: unknown): unknown {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : raw;
+  if (value === 'true' || value === true) return true;
+  if (value === 'false' || value === false) return false;
+  return raw;
+}
+
+/**
  * Função plugada em `ConfigModule.forRoot({ validate })`. Recebe o
  * process.env cru (tudo string), converte para a classe acima e valida.
  */
@@ -196,6 +216,11 @@ export function validateEnv(
 
   if (env.NODE_ENV === NodeEnv.Production) {
     problems.push(...checkProductionCredentials(env));
+    if (!env.COOKIE_SECURE) {
+      problems.push(
+        'COOKIE_SECURE não pode ser desligado em produção: sem a flag Secure o refresh token trafegaria também por HTTP',
+      );
+    }
   }
 
   if (problems.length > 0) {

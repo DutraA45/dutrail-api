@@ -13,15 +13,9 @@ function loadEnvFile(path: string): Record<string, string> {
   return parse(readFileSync(path));
 }
 
-// Os arquivos versionados: o .env local de dev é uma cópia editada do
-// .env.example, e o .env.test é o que os e2e usam. O endpoint do .env.example
-// tem "<namespace>" literal (não é URL válida), então é preenchido como no
-// .env de dev; o resto — inclusive os segredos placeholder — fica como está.
-const exampleEnv: Record<string, string> = {
-  ...loadEnvFile('.env.example'),
-  OCI_S3_ENDPOINT:
-    'https://axbc12.compat.objectstorage.sa-saopaulo-1.oraclecloud.com',
-};
+// Os arquivos versionados, sem ajustes: o .env local de dev é uma cópia
+// editada do .env.example, e o .env.test é o que os e2e usam.
+const exampleEnv = loadEnvFile('.env.example');
 const testEnv = loadEnvFile('.env.test');
 
 /**
@@ -85,7 +79,7 @@ describe('validateEnv', () => {
   });
 
   describe('development e test (regras atuais)', () => {
-    it('development aceita os valores do .env.example', () => {
+    it('development aceita o .env.example como está', () => {
       const env = validateEnv({ ...exampleEnv, NODE_ENV: 'development' });
 
       expect(env.NODE_ENV).toBe(NodeEnv.Development);
@@ -108,6 +102,63 @@ describe('validateEnv', () => {
           JWT_REFRESH_SECRET: exampleEnv.JWT_SECRET,
         }),
       ).toMatch(/JWT_SECRET e JWT_REFRESH_SECRET precisam ser diferentes/);
+    });
+  });
+
+  describe('COOKIE_SECURE', () => {
+    const { COOKIE_SECURE: _omitted, ...withoutCookieSecure } = exampleEnv;
+
+    it('é true por padrão (variável ausente), em qualquer NODE_ENV', () => {
+      for (const nodeEnv of Object.values(NodeEnv)) {
+        const raw =
+          nodeEnv === NodeEnv.Production
+            ? { ...productionEnv(), COOKIE_SECURE: undefined }
+            : { ...withoutCookieSecure, NODE_ENV: nodeEnv };
+
+        expect(validateEnv(raw).COOKIE_SECURE).toBe(true);
+      }
+    });
+
+    it.each([
+      ['true', true],
+      ['false', false],
+      [' FALSE ', false],
+    ])('development aceita "%s"', (value, expected) => {
+      expect(
+        validateEnv({ ...exampleEnv, COOKIE_SECURE: value }).COOKIE_SECURE,
+      ).toBe(expected);
+    });
+
+    it('test aceita false (o .env.test desliga o Secure)', () => {
+      expect(validateEnv(testEnv).COOKIE_SECURE).toBe(false);
+    });
+
+    it.each(['yes', '0', '1', ''])(
+      'recusa "%s": só true ou false (Boolean("false") seria true)',
+      (value) => {
+        expect(
+          validationMessage({ ...exampleEnv, COOKIE_SECURE: value }),
+        ).toMatch(/COOKIE_SECURE deve ser "true" ou "false"/);
+      },
+    );
+
+    it('production aceita true', () => {
+      expect(
+        validateEnv({ ...productionEnv(), COOKIE_SECURE: 'true' })
+          .COOKIE_SECURE,
+      ).toBe(true);
+    });
+
+    it('production recusa false, dizendo a variável e o motivo sem valores', () => {
+      const message = validationMessage({
+        ...productionEnv(),
+        COOKIE_SECURE: 'false',
+      });
+
+      expect(message).toMatch(
+        /COOKIE_SECURE não pode ser desligado em produção: sem a flag Secure o refresh token trafegaria também por HTTP/,
+      );
+      expect(message).not.toMatch(/false/i);
     });
   });
 

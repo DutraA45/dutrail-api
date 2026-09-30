@@ -1,40 +1,13 @@
-import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { parse } from 'dotenv';
 import request from 'supertest';
 import type { TestApp } from './utils/create-app.js';
+import { createAppWithEnv } from './utils/create-app-with-env.js';
 import { csp, expectSecurityHeaders } from './utils/security-headers.js';
 
-/**
- * Sobe a app com outro NODE_ENV (A-10). O ConfigModule lê o ambiente quando o
- * AppModule é importado, então o módulo é reimportado depois de trocar o env.
- *
- * Todas as variáveis vêm do .env.test (o process.env vence os arquivos, então o
- * .env de desenvolvimento, que o AppModule passa a ler fora de NODE_ENV=test,
- * não contribui com nada — em especial o DATABASE_URL). Em produção a
- * validação exige credenciais sem trechos de placeholder e segredos JWT de
- * 256 bits: geramos valores aleatórios só para este processo.
- */
-async function createAppWithNodeEnv(
+/** Sobe a app com outro NODE_ENV (A-10). */
+function createAppWithNodeEnv(
   nodeEnv: 'development' | 'production',
 ): Promise<TestApp> {
-  vi.resetModules();
-  vi.unstubAllEnvs();
-
-  const env = parse(readFileSync('.env.test'));
-  for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
-  vi.stubEnv('NODE_ENV', nodeEnv);
-  if (nodeEnv === 'production') {
-    vi.stubEnv('JWT_SECRET', randomBytes(32).toString('hex'));
-    vi.stubEnv('JWT_REFRESH_SECRET', randomBytes(32).toString('hex'));
-    vi.stubEnv('GOOGLE_CLIENT_SECRET', randomBytes(16).toString('hex'));
-    vi.stubEnv('OCI_S3_SECRET_KEY', randomBytes(16).toString('hex'));
-  }
-  // Salvaguarda igual à do global-setup: nunca subir contra outro banco.
-  expect(process.env.DATABASE_URL).toContain('test');
-
-  const { createTestApp } = await import('./utils/create-app.js');
-  return createTestApp();
+  return createAppWithEnv({ NODE_ENV: nodeEnv });
 }
 
 describe('Swagger por NODE_ENV (e2e)', () => {

@@ -2,9 +2,16 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { CookieOptions, Request, Response } from 'express';
 import type { ClientType } from '../common/decorators/client-type.decorator.js';
-import { EnvironmentVariables, NodeEnv } from '../config/env.validation.js';
+import { EnvironmentVariables } from '../config/env.validation.js';
+import type { TokenPair } from './token.service.js';
 
-/** Nome do cookie que carrega o refresh token no fluxo web. */
+/**
+ * Nome do cookie que carrega o refresh token no fluxo web.
+ *
+ * Sem o prefixo `__Secure-` de propósito (risco aceito, A-11): o browser o
+ * recusaria em http:// no dev com COOKIE_SECURE=false, e o nome faz parte do
+ * contrato com o frontend.
+ */
 export const REFRESH_COOKIE_NAME = 'refreshToken';
 
 /**
@@ -12,9 +19,6 @@ export const REFRESH_COOKIE_NAME = 'refreshToken';
  * as chamadas normais da API (menos superfície para vazamento em logs/proxies).
  */
 const REFRESH_COOKIE_PATH = '/auth';
-
-/** Igual ao JWT_REFRESH_TTL padrão (7 dias). */
-const REFRESH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Única peça que sabe **por onde** o refresh token entra e sai. A lógica de
@@ -45,10 +49,10 @@ export class RefreshTokenTransport {
   cookieOptions(): CookieOptions {
     return {
       httpOnly: true,
-      // Em produção o cookie só trafega por HTTPS. Em dev/test fica false,
-      // senão o browser (e o supertest) descartam o cookie em http://.
-      secure:
-        this.config.get('NODE_ENV', { infer: true }) === NodeEnv.Production,
+      // Só HTTPS, por padrão e independente de NODE_ENV. COOKIE_SECURE=false
+      // existe para dev em http:// (Safari, cookie jar do supertest) e é
+      // recusado no boot em produção.
+      secure: this.config.get('COOKIE_SECURE', { infer: true }),
       sameSite: 'lax',
       path: REFRESH_COOKIE_PATH,
     };
@@ -61,20 +65,25 @@ export class RefreshTokenTransport {
   deliver(
     clientType: ClientType,
     res: Response,
-    refreshToken: string,
+    tokens: Pick<TokenPair, 'refreshToken' | 'refreshTokenExpiresAt'>,
   ): string | undefined {
     if (clientType === 'mobile') {
-      return refreshToken;
+      return tokens.refreshToken;
     }
 
-    res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
+    res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, {
       ...this.cookieOptions(),
-      maxAge: REFRESH_COOKIE_MAX_AGE_MS,
+      // O cookie vive o mesmo que o token emitido (o `exp` do JWT), não um
+      // prazo fixo: acompanha qualquer JWT_REFRESH_TTL.
+      maxAge: Math.max(0, tokens.refreshTokenExpiresAt.getTime() - Date.now()),
     });
     return undefined;
   }
 
-  /** Remove o cookie no logout web. No-op para mobile. */
+  /**
+   * Remove o cookie no logout web. No-op para mobile. Sem `maxAge`: o
+   * `clearCookie` do Express 5 já força a expiração.
+   */
   clear(clientType: ClientType, res: Response): void {
     if (clientType === 'web') {
       res.clearCookie(REFRESH_COOKIE_NAME, this.cookieOptions());
