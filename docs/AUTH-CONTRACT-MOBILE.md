@@ -210,15 +210,34 @@ tem como (nem precisa) distinguir os casos: trate como sessão encerrada.
 Como o fluxo funciona hoje, para referência:
 
 1. O cliente navega (navegação de browser, não chamada HTTP) para
-   `{API}/auth/google`, que responde 302 para o Google. Esta rota **não** leva
-   `X-Client-Type`.
-2. O Google chama de volta a **API** (`GOOGLE_CALLBACK_URL`). O backend cria ou
-   vincula o usuário. Nenhum token é emitido aqui.
-3. A API responde 302 para `{FRONTEND_URL}/auth/callback?code=<código>` —
+   `{API}/auth/google`, que responde 302 para o Google e seta um cookie curto
+   de state. Esta rota **não** leva `X-Client-Type`.
+2. O Google chama de volta a **API** (`GOOGLE_CALLBACK_URL`). O backend confere
+   o `state` contra o cookie, troca o code com PKCE e cria ou vincula o
+   usuário. Nenhum token é emitido aqui.
+3. A API responde 302 para `{FRONTEND_URL}/auth/callback?code=<código>`, ou
+   para `{FRONTEND_URL}/auth/callback?error=<código>` em caso de falha —
    **é este passo que exclui o app**. Nenhum token trafega na URL.
 4. Quem recebe o `code` chama `POST /auth/google/exchange` com
    `{ "code": "..." }` e o header `X-Client-Type`. Com `X-Client-Type: mobile`,
    a resposta segue o formato mobile (`accessToken`, `refreshToken`, `user`).
+
+O fluxo exige que o browser aceite cookies de primeira parte da API durante o
+redirect: o cookie `googleOAuthState` (HttpOnly, `SameSite=Lax`,
+`Path=/auth/google`, 10 minutos) liga o callback ao browser que iniciou o login
+(`state` + PKCE contra login CSRF) e é apagado no callback, em qualquer
+desfecho. Qualquer navegador embutido que um dia rode este fluxo (Custom Tab,
+por exemplo) precisa manter esse cookie entre os passos 1 e 2.
+
+Falhas do callback nunca terminam em JSON na API. O `error` é sempre um destes
+códigos fixos (nada do Google, como `error_description`, é repassado):
+
+| `error`              | Quando                                                                                    |
+| -------------------- | ----------------------------------------------------------------------------------------- |
+| `access_denied`      | O usuário cancelou na tela de consentimento do Google                                     |
+| `email_not_verified` | O Google não garante o email da conta (a conta não é vinculada nem criada)                |
+| `state_mismatch`     | Cookie de state ausente, expirado (> 10 min), adulterado, ou `state` divergente           |
+| `oauth_failed`       | Qualquer outra falha: `code` inválido ou expirado, outro `error=` do Google, erro interno |
 
 O código tem exatamente **43 caracteres** do alfabeto `A-Za-z0-9-_` (32 bytes em
 base64url). No banco fica apenas o SHA-256 dele.

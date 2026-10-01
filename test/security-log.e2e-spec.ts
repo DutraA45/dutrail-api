@@ -5,6 +5,11 @@ import type * as FakeGoogleModule from './fakes/fake-google.strategy.js';
 import type { TestApp } from './utils/create-app.js';
 import { createAppWithEnv } from './utils/create-app-with-env.js';
 import { claimsOf, signWithSecretOf } from './utils/jwt.js';
+import {
+  captureNestLogs,
+  type LogCapture,
+  type SecurityLine,
+} from './utils/log-capture.js';
 
 /**
  * Log de eventos de segurança (A-07) contra fluxos reais.
@@ -25,60 +30,6 @@ const credentials = {
   name: 'Ana',
 };
 const WRONG_PASSWORD = 'S3nh@Errada!';
-
-interface CapturedLine {
-  level: string;
-  /** Mensagem + parâmetros extras (stack, contexto), serializados. */
-  text: string;
-  message: unknown;
-}
-
-interface SecurityLine {
-  level: string;
-  event: string;
-  timestamp: string;
-  userId?: string;
-  ip?: string;
-  userAgent?: string;
-  clientType?: string;
-  emailMasked?: string;
-  reason?: string;
-}
-
-const LEVELS = ['log', 'warn', 'error', 'debug', 'verbose', 'fatal'] as const;
-
-async function captureNestLogs() {
-  const { Logger } = await import('@nestjs/common');
-  const lines: CapturedLine[] = [];
-  const spies = LEVELS.map((level) =>
-    vi
-      .spyOn(Logger.prototype, level)
-      .mockImplementation((message: unknown, ...rest: unknown[]) => {
-        lines.push({
-          level,
-          message,
-          text: JSON.stringify([message, ...rest]),
-        });
-      }),
-  );
-
-  return {
-    lines,
-    clear: () => {
-      lines.length = 0;
-    },
-    restore: () => spies.forEach((spy) => spy.mockRestore()),
-    /** Só as linhas do SecurityLog, parseadas. */
-    events: (): SecurityLine[] =>
-      lines.flatMap(({ level, message }) => {
-        if (typeof message !== 'string' || !message.startsWith('{')) return [];
-        const parsed = JSON.parse(message) as Partial<SecurityLine>;
-        return parsed.event ? [{ level, ...parsed } as SecurityLine] : [];
-      }),
-  };
-}
-
-type LogCapture = Awaited<ReturnType<typeof captureNestLogs>>;
 
 /** Tem de existir uma linha com o evento e os campos dados. */
 function expectEvent(
@@ -104,6 +55,7 @@ describe('Log de segurança (e2e)', () => {
   let logs: LogCapture;
   let fakeGoogle: typeof FakeGoogleModule.fakeGoogle;
   let makeGoogleProfile: typeof FakeGoogleModule.makeGoogleProfile;
+  let google: typeof FakeGoogleModule;
 
   const http = () => request(t.app.getHttpServer());
   const post = (path: string, clientType: 'web' | 'mobile' = 'mobile') =>
@@ -111,8 +63,8 @@ describe('Log de segurança (e2e)', () => {
       .post(path)
       .set('X-Client-Type', clientType)
       .set('User-Agent', USER_AGENT);
-  const callback = (query: string) =>
-    http().get(`/auth/google/callback?${query}`).set('User-Agent', USER_AGENT);
+  /** Um browser novo (cookie jar) com o User-Agent dos testes. */
+  const browser = () => request.agent(t.app.getHttpServer());
 
   async function signup(): Promise<{ userId: string; refreshToken: string }> {
     const res = await post('/auth/signup').send(credentials).expect(201);
@@ -125,20 +77,20 @@ describe('Log de segurança (e2e)', () => {
   /** Callback do Google com sucesso; devolve o código de troca do redirect. */
   async function googleCode(email = credentials.email): Promise<string> {
     fakeGoogle.profile = makeGoogleProfile({ email, id: 'google-id-ana' });
-    const res = await callback('code=google-c0de&state=st4te').expect(302);
-    return new URL(res.headers.location).searchParams.get('code')!;
+    const res = await google.googleCallback(t.app.getHttpServer(), USER_AGENT);
+    return google.exchangeCodeOf(res.headers.location);
   }
 
   beforeAll(async () => {
     t = await createAppWithEnv({ SECURITY_LOG_ENABLED: 'true' });
-    ({ fakeGoogle, makeGoogleProfile } =
-      await import('./fakes/fake-google.strategy.js'));
+    google = await import('./fakes/fake-google.strategy.js');
+    ({ fakeGoogle, makeGoogleProfile } = google);
     logs = await captureNestLogs();
   });
 
   beforeEach(async () => {
     await t.resetDb();
-    fakeGoogle.profile = null;
+    fakeGoogle.reset();
     logs.clear();
   });
 
@@ -340,26 +292,74 @@ describe('Log de segurança (e2e)', () => {
     expectEvent(logs, { event: 'google_exchange_failed', reason: 'used' });
   });
 
-  it('falha do callback do Google (500 e 401): callback_error, sem a query', async () => {
-    // Sem perfil configurado, a strategy falsa falha com um Error comum: 500.
-    await callback('code=abc123&state=st4te987').expect(500);
-    // Email não verificado pelo Google: 401.
+  it('falhas do callback do Google (A-13): um reason fixo por desfecho, sem query, state ou verifier', async () => {
+    const callbackIn = (agent: ReturnType<typeof browser>, path: string) =>
+      agent.get(path).set('User-Agent', USER_AGENT).expect(302);
+    const expectedReasons: string[] = [];
+    const seen: string[] = [];
+
+    // Sem cookie de state (login CSRF): state_mismatch.
+    await callbackIn(
+      browser(),
+      google.callbackPath({
+        code: 'c0de-sem-cookie',
+        state: 'st4te-sem-cookie',
+      }),
+    );
+    expectedReasons.push('state_mismatch');
+
+    // Cancelamento: access_denied, sem a descrição do Google.
+    const cancel = browser();
+    const cancelled = await google.startGoogleLogin(cancel, USER_AGENT);
+    seen.push(cancelled.state);
+    await callbackIn(
+      cancel,
+      google.callbackPath({
+        error: 'access_denied',
+        error_description: 'descricao-do-google',
+        state: cancelled.state,
+      }),
+    );
+    expectedReasons.push('access_denied');
+
+    // Email não verificado pelo Google.
     fakeGoogle.profile = makeGoogleProfile({ verified: false });
-    await callback('code=def456&state=st4te654').expect(401);
+    await google.googleCallback(t.app.getHttpServer(), USER_AGENT);
+    expectedReasons.push('email_not_verified');
+
+    // `code` inválido (TokenError): callback_error, sem 500.
+    const invalid = browser();
+    const consent = await google.startGoogleLogin(invalid, USER_AGENT);
+    seen.push(consent.state);
+    await callbackIn(
+      invalid,
+      google.callbackPath({ code: 'c0de-invalido', state: consent.state }),
+    );
+    expectedReasons.push('callback_error');
 
     const failures = logs
       .events()
       .filter((e) => e.event === 'google_exchange_failed');
-    expect(failures).toHaveLength(2);
+    expect(failures.map((f) => f.reason)).toEqual(expectedReasons);
     for (const line of failures) {
-      expect(line).toMatchObject({
-        level: 'warn',
-        reason: 'callback_error',
-        userAgent: USER_AGENT,
-      });
+      expect(line).toMatchObject({ level: 'warn', userAgent: USER_AGENT });
     }
+    // Nenhuma linha (de nenhum logger) é erro com stack nesses desfechos.
+    expect(logs.lines.filter((l) => l.level === 'error')).toEqual([]);
+
+    seen.push(
+      ...fakeGoogle.tokenRequests.flatMap((r) => [r.code, r.codeVerifier!]),
+    );
     const all = logs.lines.map((l) => l.text).join('\n');
-    for (const value of ['abc123', 'st4te987', 'def456', 'st4te654', '?code']) {
+    for (const value of [
+      ...seen,
+      'c0de-sem-cookie',
+      'st4te-sem-cookie',
+      'c0de-invalido',
+      'descricao-do-google',
+      '?code',
+      '?error',
+    ]) {
       expect(all).not.toContain(value);
     }
   });
@@ -434,16 +434,32 @@ describe('Log de segurança (e2e)', () => {
       .expect(401);
     expectEvent(logs, { event: 'refresh_invalid', reason: 'not_found' });
 
-    // Google: callback com falha, callback ok (takeover), troca válida e inválida.
-    await callback('code=g00gle-auth-c0de&state=0auth-st4te').expect(500);
+    // Google: callback com falha (sem cookie de state, e erro inesperado),
+    // callback ok (takeover), troca válida e inválida.
+    await http()
+      .get(
+        google.callbackPath({ code: 'g00gle-auth-c0de', state: '0auth-st4te' }),
+      )
+      .expect(302);
+    await google.googleCallback(t.app.getHttpServer(), USER_AGENT);
     fakeGoogle.profile = makeGoogleProfile({
       email: credentials.email,
       id: 'google-id-ana',
     });
-    const cb = await callback('code=g00gle-auth-c0de&state=0auth-st4te').expect(
-      302,
+    const googleBrowser = browser();
+    const consent = await google.startGoogleLogin(googleBrowser, USER_AGENT);
+    const cb = await googleBrowser
+      .get(google.callbackPath(consent))
+      .set('User-Agent', USER_AGENT)
+      .expect(302);
+    const exchangeCode = google.exchangeCodeOf(cb.headers.location);
+    // state, verifier e o cookie selado também são segredos (A-02).
+    secrets.push(
+      consent.state,
+      consent.code,
+      consent.stateCookie,
+      ...fakeGoogle.tokenRequests.map((r) => r.codeVerifier!),
     );
-    const exchangeCode = new URL(cb.headers.location).searchParams.get('code')!;
     const exchanged = await post('/auth/google/exchange')
       .send({ code: exchangeCode })
       .expect(200);

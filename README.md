@@ -60,8 +60,11 @@ src/
 │   ├── token.service.ts    # emissão, rotação e revogação de JWT/refresh
 │   ├── password.service.ts # argon2
 │   ├── refresh-token-transport.service.ts  # cookie (web) vs corpo (mobile)
+│   ├── oauth-state.store.ts    # state + PKCE do Google em cookie assinado
+│   ├── google-callback.ts      # códigos de ?error= do callback do Google
 │   ├── strategies/         # JwtStrategy, GoogleStrategy
-│   ├── guards/             # JwtAuthGuard (global), GoogleAuthGuard
+│   ├── guards/             # JwtAuthGuard (global), GoogleAuthGuard, GoogleCallbackGuard
+│   ├── filters/            # GoogleCallbackFilter (falha do callback → redirect)
 │   └── dto/                # DTOs de entrada/saída com @ApiProperty
 └── generated/prisma/       # client gerado (gitignored; `npm run prisma:generate`)
 prisma/schema.prisma        # User, RefreshToken, OAuthExchangeCode, Activity
@@ -140,6 +143,14 @@ quê, sem mostrar o valor.
      — precisa ser **idêntica** a `GOOGLE_CALLBACK_URL`.
 4. Copie _Client ID_ e _Client secret_ para o `.env`.
 
+Em `development` e `test`, o boot emite um **warn** (sem falhar e sem mostrar
+valores) quando `GOOGLE_CLIENT_ID` ou `GOOGLE_CLIENT_SECRET` contêm um trecho
+de placeholder do `.env.example` (`xxx`, `troque`, `change`, `example`,
+`secret`, `senha`), ou quando o caminho de `GOOGLE_CALLBACK_URL` não é
+exatamente `/auth/google/callback`. Os dois casos só falhariam lá no Google,
+longe da causa. Em `production` os placeholders continuam recusados no boot
+(A-05).
+
 ### 4. Object storage dos arquivos `.fit`
 
 Os `.fit` originais importados ficam num bucket do **Oracle Cloud Object
@@ -192,7 +203,7 @@ só é registrado fora de produção: com `NODE_ENV=production`, `/docs`,
 | POST   | `/auth/refresh`         | refresh token | obrigatório     | Novo par de tokens; o antigo é invalidado (rotação)        |
 | POST   | `/auth/logout`          | refresh token | obrigatório     | Revoga o refresh token. 204                                |
 | GET    | `/auth/google`          | —             | —               | Redireciona para o consentimento do Google                 |
-| GET    | `/auth/google/callback` | —             | —               | Retorno do Google → redirect para o frontend com `?code=`  |
+| GET    | `/auth/google/callback` | —             | —               | Retorno do Google → redirect para o frontend com `?code=` ou `?error=` |
 | POST   | `/auth/google/exchange` | código        | obrigatório     | Troca o código de uso único por tokens                     |
 | GET    | `/me`                   | Bearer        | —               | Usuário autenticado (rota protegida de exemplo)            |
 | GET    | `/activities`           | Bearer        | —               | Atividades do usuário, paginadas por cursor                |
@@ -243,7 +254,9 @@ Formato de erro (todas as rotas, via `AllExceptionsFilter`):
 Google: abra `GET /auth/google` numa janela do browser. Após o consentimento a
 API redireciona para `FRONTEND_URL/auth/callback?code=...`; o frontend chama
 `POST /auth/google/exchange { code }` (o código vale 60 s, uso único) e recebe
-o mesmo payload do login.
+o mesmo payload do login. Se algo falhar, o redirect vem com
+`?error=access_denied | email_not_verified | state_mismatch | oauth_failed`
+(ver [Login com Google](#login-com-google-state-pkce-e-erros)).
 
 ## Testes
 
@@ -257,8 +270,13 @@ Os e2e (`test/*.e2e-spec.ts`) sobem a aplicação completa contra um banco
 real. `test/global-setup.ts` carrega `.env.test` e roda `prisma migrate
 deploy`; cada teste **trunca as tabelas** (por isso há uma trava exigindo que
 `DATABASE_URL` contenha `test`). A `GoogleStrategy` é substituída por
-`test/fakes/fake-google.strategy.ts`, que devolve um perfil configurável sem
-falar com o Google, mas exercita a lógica real de criação/vinculação de conta.
+`test/fakes/fake-google.strategy.ts`, que é a strategy real (state, PKCE,
+cookie, tratamento de erros, criação/vinculação de conta) com só as duas
+chamadas de rede ao Google trocadas: o endpoint de token aceita o `code` apenas
+com o `code_verifier` certo (S256), como o Google, e o userinfo devolve um
+perfil configurável. `test/google-oauth.e2e-spec.ts` cobre o fluxo de ponta a
+ponta (login CSRF, injeção de `code`, cookie adulterado/expirado, cancelamento,
+erros do Google e varredura dos logs).
 O storage dos `.fit` também é um fake em memória, o que permite simular falha
 do provedor. O fixture `test/fixtures/running.fit` é sintético, gerado pelo
 Encoder da Garmin, e não contém GPS. Para regenerá-lo, rode
@@ -345,6 +363,50 @@ derrubar as outras sessões (um retry do cliente não deve deslogar o celular).
 **Callback do Google não coloca tokens na URL.** URLs vazam em histórico,
 logs de proxy e `Referer`. O callback gera um código de uso único (hash no
 banco, 60 s) e o frontend o troca por tokens em `POST /auth/google/exchange`.
+
+### Login com Google: state, PKCE e erros
+
+**`state` + PKCE (S256) num cookie assinado (A-02).** Sem eles, o callback
+aceitaria qualquer `code`, e um atacante poderia logar a vítima na conta
+_dele_ (login CSRF: as atividades que ela importasse iriam para o atacante).
+Como a sessão do Express está desligada, o `OAuthStateStore`
+(`src/auth/oauth-state.store.ts`) substitui o store de sessão do
+passport-oauth2:
+
+- `GET /auth/google` gera um `state` de 256 bits; o `code_verifier` (43
+  caracteres, RFC 7636) é gerado pela própria strategy, que deriva o
+  `code_challenge` dele. Os dois vão para o cookie `googleOAuthState`:
+  HttpOnly, `SameSite=Lax`, `Path=/auth/google`, `Secure` conforme
+  `COOKIE_SECURE`, 10 minutos. `Lax` e não `Strict`: o callback chega por
+  navegação vinda de `accounts.google.com`, e com `Strict` o browser não
+  mandaria o cookie.
+- O conteúdo é assinado com HMAC-SHA256 e carrega a própria expiração. A chave
+  é derivada do `JWT_SECRET` por HKDF com o rótulo fixo `dutrail-oauth-state`,
+  sem variável nova: o rótulo separa os usos, e quem tem o `JWT_SECRET` já
+  forjaria qualquer access token. Trocar o `JWT_SECRET` só derruba logins com
+  Google em andamento (no máximo 10 minutos).
+- No callback, o `state` da URL é comparado com o do cookie em tempo constante,
+  e o `code_verifier` do cookie vai na troca do `code`. O cookie é apagado na
+  entrada do callback (mesmas opções), então some em qualquer desfecho.
+- O `state` vai na URL do Google, como manda o protocolo. O `code_verifier` só
+  existe dentro do cookie. Nenhum dos dois, nem o cookie, aparece em log ou
+  resposta JSON.
+- O store recebe só o `req` do passport-oauth2, mas precisa setar o cookie
+  antes de a strategy responder o 302. Por isso usa o `req.res`, que o Express
+  liga a toda request.
+
+Consequência para o cliente: o browser precisa aceitar cookies de primeira
+parte da API durante o redirect. Dois logins simultâneos no mesmo browser:
+vale o último.
+
+**Falhas do callback vão para o frontend (A-13).** O `GoogleCallbackGuard`
+classifica cada desfecho e o `GoogleCallbackFilter` responde
+`302 {FRONTEND_URL}/auth/callback?error=<código>`, nunca JSON nem 500:
+`access_denied` (cancelamento), `email_not_verified`, `state_mismatch` e
+`oauth_failed` (`code` inválido, outro `error=` do Google, falha interna). Nada
+que o Google manda (`error_description`) é repassado. Erros do OAuth não geram
+stack no log. Um erro interno inesperado (banco fora, bug) também vira
+`oauth_failed` para o usuário, mas o stack é logado, só com o path.
 
 **Vinculação de conta Google.** Ordem: `googleId` → email → criar. A
 vinculação por email só acontece se o Google afirma `email_verified`; caso
@@ -438,7 +500,7 @@ testes.
 | `logout`                  | log / warn      | Logout (warn só quando o token tem assinatura inválida, caso em que a resposta é 401)   | `no_token`, `not_found`, `invalid_jwt`, `expired`            |
 | `google_link`             | log / warn      | Conta Google vinculada a uma conta local com o mesmo email                              | `verified_account` (log), `unverified_takeover` (warn: senha e sessões descartadas, A-01) |
 | `google_exchange_success` | log             | `POST /auth/google/exchange` entregou tokens                                            | —                                                            |
-| `google_exchange_failed`  | warn            | Código de troca recusado, ou falha (401/5xx) em `GET /auth/google/callback`              | `not_found`, `used`, `expired`, `concurrent_use`, `callback_error` |
+| `google_exchange_failed`  | warn            | Código de troca recusado, ou falha em `GET /auth/google/callback` (um `reason` por `?error=`) | troca: `not_found`, `used`, `expired`, `concurrent_use`; callback: `state_mismatch`, `access_denied`, `email_not_verified`, `callback_error` (= `oauth_failed`) |
 | `rate_limited`            | warn            | 429 do throttler, em qualquer rota                                                      | —                                                            |
 
 **Campos.** `event`, `timestamp` (ISO 8601) e, quando houver, `userId`, `ip`
@@ -452,7 +514,7 @@ ausentes não aparecem na linha.
 > balancer, esse é o IP do proxy, e não o do cliente.
 
 **Nunca vão para o log:** senha, tokens (access, refresh, código de troca do
-Google, `code`/`state` do callback), hashes (de senha, de token, de email),
+Google, `code`/`state` do callback, `code_verifier` e o cookie de state), hashes (de senha, de token, de email),
 query string de URL e email em claro. Quando é preciso identificar o email
 (`signup`, `login_failed`), ele sai mascarado (`ana@example.com` →
 `a***@e***.com`), e não em hash: o hash de um email é revertido por
@@ -465,9 +527,9 @@ as linhas de log em busca desses valores.
 **Como os dados chegam ao log.** O controller monta um `SecurityContext`
 (`ip`, `userAgent`, `clientType`) a partir do `req` e o passa como parâmetro
 ao `AuthService` e ao `TokenService`. Não há provider request-scoped nem
-AsyncLocalStorage. O 429 e as falhas do callback do Google acontecem em
-guards, antes de qualquer service, e por isso são registrados pelo
-`AllExceptionsFilter`.
+AsyncLocalStorage. O 429 acontece num guard, antes de qualquer service, e por
+isso é registrado pelo `AllExceptionsFilter`. As falhas do callback do Google
+são registradas pelo `GoogleCallbackFilter`, que também faz o redirect.
 
 **Alertas sugeridos:**
 

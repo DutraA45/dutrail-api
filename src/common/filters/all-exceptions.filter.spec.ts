@@ -171,30 +171,13 @@ describe('AllExceptionsFilter', () => {
       );
     });
 
-    it.each([
-      ['401', new UnauthorizedException()],
-      ['500', new Error('TokenError: bad code')],
-    ])(
-      'falha %s no callback do Google vira google_exchange_failed/callback_error',
-      (_status, error) => {
-        const { host } = createHost(callback);
-        filter.catch(error, host);
-
-        expect(securityLog.warn).toHaveBeenCalledTimes(1);
-        expect(securityLog.warn).toHaveBeenCalledWith(
-          'google_exchange_failed',
-          expect.objectContaining({ ip: '203.0.113.7' }),
-          { reason: 'callback_error' },
-        );
-        // Nem o code nem o state chegam ao log de segurança.
-        const logged = JSON.stringify(securityLog.warn.mock.calls);
-        expect(logged).not.toContain('abc123');
-        expect(logged).not.toContain('st4te987');
-      },
-    );
-
-    it('não registra outros erros (400 no callback, 401 fora dele)', () => {
+    it('não registra outros erros, nem no callback do Google (que tem filtro próprio, A-13)', () => {
       filter.catch(new BadRequestException(), createHost(callback).host);
+      filter.catch(new UnauthorizedException(), createHost(callback).host);
+      filter.catch(
+        new Error('TokenError: bad code'),
+        createHost(callback).host,
+      );
       filter.catch(new UnauthorizedException(), createHost().host);
 
       expect(securityLog.warn).not.toHaveBeenCalled();

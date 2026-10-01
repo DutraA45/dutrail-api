@@ -2,7 +2,11 @@ import 'reflect-metadata';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { parse } from 'dotenv';
+import { PATH_METADATA } from '@nestjs/common/constants.js';
+import { AuthController } from '../auth/auth.controller.js';
+import { GOOGLE_CALLBACK_PATH } from '../auth/google-callback.js';
 import {
+  googleConfigWarnings,
   NodeEnv,
   PLACEHOLDER_FRAGMENTS,
   PRODUCTION_JWT_SECRET_MIN_LENGTH,
@@ -368,5 +372,111 @@ describe('validateEnv', () => {
       expect(message).not.toContain(env.JWT_SECRET);
       expect(message).not.toContain(env.JWT_REFRESH_SECRET);
     });
+  });
+});
+
+describe('googleConfigWarnings (aviso de desenvolvimento)', () => {
+  const realLooking = {
+    NODE_ENV: NodeEnv.Development,
+    GOOGLE_CLIENT_ID:
+      '123456789012-a1b2c3d4e5f6g7h8.apps.googleusercontent.com',
+    GOOGLE_CLIENT_SECRET: 'GOCSPX-Q7vRk2Lm9TzA4bN8wYp3',
+    GOOGLE_CALLBACK_URL: 'http://localhost:3000/auth/google/callback',
+  };
+  const warn = (overrides: Partial<typeof realLooking>) =>
+    googleConfigWarnings(
+      { ...realLooking, ...overrides },
+      GOOGLE_CALLBACK_PATH,
+    );
+
+  it('o caminho conferido é exatamente a rota do callback no controller', () => {
+    const controllerPath = Reflect.getMetadata(
+      PATH_METADATA,
+      AuthController,
+    ) as string;
+    // O Nest guarda o path do método na própria função do handler.
+    const handler = Object.getOwnPropertyDescriptor(
+      AuthController.prototype,
+      'googleCallback',
+    )?.value as object;
+    const methodPath = Reflect.getMetadata(PATH_METADATA, handler) as string;
+    expect(GOOGLE_CALLBACK_PATH).toBe(`/${controllerPath}/${methodPath}`);
+  });
+
+  it.each([NodeEnv.Development, NodeEnv.Test])(
+    'nada a avisar com credenciais plausíveis e o callback certo (%s)',
+    (nodeEnv) => {
+      expect(warn({ NODE_ENV: nodeEnv })).toEqual([]);
+    },
+  );
+
+  it.each(PLACEHOLDER_FRAGMENTS)(
+    'avisa placeholder "%s" no GOOGLE_CLIENT_ID e no GOOGLE_CLIENT_SECRET',
+    (fragment) => {
+      const id = `123-${fragment.toUpperCase()}.apps.googleusercontent.com`;
+      const secret = `GOCSPX-${fragment}-abc`;
+      const warnings = warn({
+        GOOGLE_CLIENT_ID: id,
+        GOOGLE_CLIENT_SECRET: secret,
+      });
+
+      expect(warnings).toHaveLength(2);
+      expect(warnings[0]).toMatch(
+        new RegExp(
+          `^GOOGLE_CLIENT_ID contém o trecho de placeholder "${fragment}"`,
+        ),
+      );
+      expect(warnings[1]).toMatch(/^GOOGLE_CLIENT_SECRET contém/);
+      // Diz qual variável e por quê, nunca o valor.
+      expect(warnings.join('\n')).not.toContain(id);
+      expect(warnings.join('\n')).not.toContain(secret);
+    },
+  );
+
+  it.each([
+    ['outra rota', 'http://localhost:3000/auth/google/redirect'],
+    ['barra no fim', 'http://localhost:3000/auth/google/callback/'],
+    ['prefixo', 'http://localhost:3000/api/auth/google/callback'],
+    ['só o host', 'http://localhost:3000'],
+  ])('avisa GOOGLE_CALLBACK_URL com %s', (_label, url) => {
+    const warnings = warn({ GOOGLE_CALLBACK_URL: url });
+    expect(warnings).toEqual([
+      'o caminho de GOOGLE_CALLBACK_URL não é /auth/google/callback (a rota do callback); o Google redirecionaria para uma rota que não existe',
+    ]);
+    expect(warnings[0]).not.toContain(url);
+  });
+
+  it('aceita qualquer host/porta com o caminho exato', () => {
+    expect(
+      warn({
+        GOOGLE_CALLBACK_URL: 'https://api.dutrail.app/auth/google/callback',
+      }),
+    ).toEqual([]);
+  });
+
+  it('não avisa em produção (lá o boot já recusa os placeholders)', () => {
+    expect(
+      warn({
+        NODE_ENV: NodeEnv.Production,
+        GOOGLE_CLIENT_ID: 'xxx',
+        GOOGLE_CALLBACK_URL: 'https://api.dutrail.app/outra',
+      }),
+    ).toEqual([]);
+  });
+
+  it('o .env.example dispara o aviso das duas credenciais, mas não o do callback', () => {
+    const warnings = googleConfigWarnings(
+      {
+        NODE_ENV: NodeEnv.Development,
+        GOOGLE_CLIENT_ID: exampleEnv.GOOGLE_CLIENT_ID,
+        GOOGLE_CLIENT_SECRET: exampleEnv.GOOGLE_CLIENT_SECRET,
+        GOOGLE_CALLBACK_URL: exampleEnv.GOOGLE_CALLBACK_URL,
+      },
+      GOOGLE_CALLBACK_PATH,
+    );
+    expect(warnings.map((w) => w.split(' ')[0])).toEqual([
+      'GOOGLE_CLIENT_ID',
+      'GOOGLE_CLIENT_SECRET',
+    ]);
   });
 });

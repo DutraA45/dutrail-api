@@ -9,6 +9,7 @@ import {
   Req,
   Res,
   UnauthorizedException,
+  UseFilters,
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -47,10 +48,13 @@ import {
   TokenPairDto,
 } from './dto/auth-response.dto.js';
 import { ExchangeCodeDto } from './dto/exchange-code.dto.js';
+import { GoogleCallbackFilter } from './filters/google-callback.filter.js';
+import { frontendCallbackUrl, GoogleCallbackError } from './google-callback.js';
 import { LoginDto } from './dto/login.dto.js';
 import { RefreshTokenDto } from './dto/refresh-token.dto.js';
 import { SignupDto } from './dto/signup.dto.js';
 import { GoogleAuthGuard } from './guards/google-auth.guard.js';
+import { GoogleCallbackGuard } from './guards/google-callback.guard.js';
 import { RefreshTokenTransport } from './refresh-token-transport.service.js';
 
 /**
@@ -233,8 +237,8 @@ export class AuthController {
   }
 
   /**
-   * O guard faz tudo: a GoogleStrategy responde com um 302 para o Google e o
-   * corpo deste método nunca executa.
+   * O guard faz tudo: a GoogleStrategy seta o cookie de state (A-02) e responde
+   * com um 302 para o Google; o corpo deste método nunca executa.
    *
    * Sem X-Client-Type: é uma navegação do browser, que não permite headers
    * customizados. O tipo de cliente é declarado depois, no /auth/google/exchange.
@@ -246,7 +250,8 @@ export class AuthController {
     summary: 'Inicia o login com Google',
     description:
       'Abra esta URL no browser (window.location); ela redireciona para a tela de consentimento ' +
-      'do Google. Não aceita header X-Client-Type.',
+      'do Google e seta um cookie curto (state + PKCE) que o callback confere. Não aceita ' +
+      'header X-Client-Type.',
   })
   @ApiResponse({
     status: 302,
@@ -255,26 +260,35 @@ export class AuthController {
   googleLogin(): void {}
 
   /**
-   * URL cadastrada no Google Console. Aqui o guard já rodou a strategy e
-   * `req.user` é o usuário criado/vinculado. Em vez de colocar tokens na URL
-   * (histórico do browser, logs de proxy), geramos um código de uso único e
-   * o frontend o troca por tokens em POST /auth/google/exchange.
+   * URL cadastrada no Google Console. Aqui o guard já conferiu o state, trocou
+   * o code e rodou a strategy: `req.user` é o usuário criado/vinculado. Em vez
+   * de colocar tokens na URL (histórico do browser, logs de proxy), geramos um
+   * código de uso único e o frontend o troca por tokens em
+   * POST /auth/google/exchange.
    *
-   * Falhas (401/5xx) acontecem no guard, antes deste método, e são
-   * registradas pelo AllExceptionsFilter como `google_exchange_failed`.
+   * Falhas (no guard ou aqui) viram GoogleCallbackError, que o
+   * GoogleCallbackFilter converte em redirect com `?error=<código>` (A-13).
    */
   @Public()
   @Get('google/callback')
-  @UseGuards(GoogleAuthGuard)
+  @UseGuards(GoogleCallbackGuard)
+  @UseFilters(GoogleCallbackFilter)
   @Redirect(undefined, HttpStatus.FOUND)
   @ApiExcludeEndpoint() // chamado só pelo Google; não faz sentido no Swagger
   async googleCallback(
     @Req() req: Request & { user: User },
   ): Promise<{ url: string }> {
-    const code = await this.authService.createExchangeCode(req.user.id);
-    const frontend = this.config.get('FRONTEND_URL', { infer: true });
+    let code: string;
+    try {
+      code = await this.authService.createExchangeCode(req.user.id);
+    } catch (err) {
+      throw new GoogleCallbackError('oauth_failed', err);
+    }
     return {
-      url: `${frontend}/auth/callback?code=${encodeURIComponent(code)}`,
+      url: frontendCallbackUrl(
+        this.config.get('FRONTEND_URL', { infer: true }),
+        { code },
+      ),
     };
   }
 

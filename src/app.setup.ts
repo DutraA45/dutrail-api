@@ -1,10 +1,15 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
 import type { Request, RequestHandler } from 'express';
 import helmet from 'helmet';
-import { EnvironmentVariables, NodeEnv } from './config/env.validation.js';
+import { GOOGLE_CALLBACK_PATH } from './auth/google-callback.js';
+import {
+  EnvironmentVariables,
+  googleConfigWarnings,
+  NodeEnv,
+} from './config/env.validation.js';
 
 /** Onde o Swagger é montado: UI em /docs (e assets em /docs/*), JSON em /docs-json. */
 export const SWAGGER_PATH = 'docs';
@@ -80,6 +85,7 @@ function securityHeaders(swaggerEnabled: boolean): RequestHandler {
  */
 export function configureApp(app: INestApplication): void {
   const config = app.get(ConfigService<EnvironmentVariables, true>);
+  warnAboutGoogleConfig(config);
   const swaggerEnabled = shouldSetupSwagger(
     config.get('NODE_ENV', { infer: true }),
   );
@@ -132,4 +138,27 @@ export function configureApp(app: INestApplication): void {
   SwaggerModule.setup(SWAGGER_PATH, app, () =>
     SwaggerModule.createDocument(app, swaggerConfig),
   );
+}
+
+/**
+ * Em development/test, avisa (sem falhar e sem imprimir valores) quando a
+ * configuração do Google parece o placeholder ou aponta o callback para outra
+ * rota. Em produção quem cuida é a validação do boot (A-05).
+ */
+export function warnAboutGoogleConfig(
+  config: ConfigService<EnvironmentVariables, true>,
+  logger = new Logger('Config'),
+): void {
+  const warnings = googleConfigWarnings(
+    {
+      NODE_ENV: config.get('NODE_ENV', { infer: true }),
+      GOOGLE_CLIENT_ID: config.get('GOOGLE_CLIENT_ID', { infer: true }),
+      GOOGLE_CLIENT_SECRET: config.get('GOOGLE_CLIENT_SECRET', { infer: true }),
+      GOOGLE_CALLBACK_URL: config.get('GOOGLE_CALLBACK_URL', { infer: true }),
+    },
+    GOOGLE_CALLBACK_PATH,
+  );
+  for (const warning of warnings) {
+    logger.warn(warning);
+  }
 }

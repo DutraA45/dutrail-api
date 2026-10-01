@@ -38,9 +38,14 @@ export type SecurityReason =
   // google_link
   | 'verified_account'
   | 'unverified_takeover'
-  // google_exchange_failed
+  // google_exchange_failed: troca do código (POST /auth/google/exchange)
   | 'used'
   | 'concurrent_use'
+  // google_exchange_failed: callback do Google (A-13), um por código de
+  // ?error= do redirect; `callback_error` é o `oauth_failed`
+  | 'state_mismatch'
+  | 'access_denied'
+  | 'email_not_verified'
   | 'callback_error';
 
 export interface SecurityEventDetails {

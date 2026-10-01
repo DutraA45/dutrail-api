@@ -7,6 +7,7 @@ import { UsersModule } from '../users/users.module.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
+import { OAuthStateStore } from './oauth-state.store.js';
 import { PasswordService } from './password.service.js';
 import { RefreshTokenTransport } from './refresh-token-transport.service.js';
 import { GoogleStrategy } from './strategies/google.strategy.js';
@@ -30,6 +31,8 @@ import { TokenService } from './token.service.js';
     PasswordService,
     // Sabe apenas POR ONDE o refresh token entra e sai (cookie vs corpo).
     RefreshTokenTransport,
+    // Cookie assinado com o state + code_verifier do login com Google (A-02).
+    OAuthStateStore,
     // Strategies são providers comuns: ao serem instanciadas se registram no
     // passport (pelo mixin PassportStrategy) sob os nomes 'jwt' e 'google'.
     JwtStrategy,

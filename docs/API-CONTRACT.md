@@ -108,15 +108,15 @@ em produção.
 
 ## Endpoints
 
-| Método | Rota                    | `X-Client-Type` | Corpo enviado                         | Sucesso | Resposta                              |
-| ------ | ----------------------- | --------------- | ------------------------------------- | ------- | ------------------------------------- |
-| POST   | `/auth/signup`          | obrigatório     | `email`, `password`, `name?`          | 201     | access (+ refresh se mobile) + `user` |
-| POST   | `/auth/login`           | obrigatório     | `email`, `password`                   | 200     | access (+ refresh se mobile) + `user` |
-| POST   | `/auth/refresh`         | obrigatório     | vazio (web) / `refreshToken` (mobile) | 200     | access (+ refresh se mobile)          |
-| POST   | `/auth/logout`          | obrigatório     | vazio (web) / `refreshToken` (mobile) | 204     | corpo vazio                           |
-| GET    | `/auth/google`          | —               | —                                     | 302     | redirect para o Google                |
-| POST   | `/auth/google/exchange` | obrigatório     | `code`                                | 200     | access (+ refresh se mobile) + `user` |
-| GET    | `/me`                   | —               | — (Bearer)                            | 200     | apenas `user`                         |
+| Método | Rota                    | `X-Client-Type` | Corpo enviado                         | Sucesso | Resposta                                   |
+| ------ | ----------------------- | --------------- | ------------------------------------- | ------- | ------------------------------------------ |
+| POST   | `/auth/signup`          | obrigatório     | `email`, `password`, `name?`          | 201     | access (+ refresh se mobile) + `user`      |
+| POST   | `/auth/login`           | obrigatório     | `email`, `password`                   | 200     | access (+ refresh se mobile) + `user`      |
+| POST   | `/auth/refresh`         | obrigatório     | vazio (web) / `refreshToken` (mobile) | 200     | access (+ refresh se mobile)               |
+| POST   | `/auth/logout`          | obrigatório     | vazio (web) / `refreshToken` (mobile) | 204     | corpo vazio                                |
+| GET    | `/auth/google`          | —               | —                                     | 302     | redirect para o Google (+ cookie de state) |
+| POST   | `/auth/google/exchange` | obrigatório     | `code`                                | 200     | access (+ refresh se mobile) + `user`      |
+| GET    | `/me`                   | —               | — (Bearer)                            | 200     | apenas `user`                              |
 
 A validação rejeita campos desconhecidos: enviar `name` em `/auth/login`
 retorna **400**, não é ignorado. `email` é normalizado no servidor (trim +
@@ -226,9 +226,10 @@ não tem como (nem precisa) distinguir os casos: trate como sessão encerrada.
 ## Login com Google
 
 ```
-Angular → Google:  1. window.location = {API}/auth/google        (302)
-Google  → API:     2. GET {API}/auth/google/callback?code=...
+Angular → Google:  1. window.location = {API}/auth/google        (302 + cookie de state)
+Google  → API:     2. GET {API}/auth/google/callback?code=...&state=...  (+ cookie de state)
 API     → Angular: 3. 302 {FRONTEND_URL}/auth/callback?code=<43 chars>
+                      ou 302 {FRONTEND_URL}/auth/callback?error=<código>
 Angular → API:     4. POST {API}/auth/google/exchange { code }   + X-Client-Type
 API     → Angular:    200 access token (+ cookie ou refresh no corpo) + user
 ```
@@ -237,15 +238,47 @@ API     → Angular:    200 access token (+ cookie ou refresh no corpo) + user
    Não funciona com `HttpClient`/`fetch`: a resposta é um 302 para
    `accounts.google.com`, que bloqueia XHR cross-origin. Esta rota **não** leva
    `X-Client-Type` (navegação de browser não define headers customizados).
+   A resposta seta um cookie curto de state (ver abaixo).
 2. O Google chama de volta a **API** (`GOOGLE_CALLBACK_URL`, cadastrada
-   idêntica no Google Console). O backend cria ou vincula o usuário. Nenhum
-   token e nenhum cookie são emitidos aqui.
-3. A API responde 302 para `{FRONTEND_URL}/auth/callback?code=<código>`. O
-   cliente web precisa registrar a rota **`/auth/callback`** lendo o query
-   param `code`. Nenhum token trafega na URL.
-4. O componente dessa rota chama `POST /auth/google/exchange` com
-   `{ "code": "..." }` **e o header `X-Client-Type`** — é aqui que o tipo de
+   idêntica no Google Console). O backend confere o `state` contra o cookie,
+   troca o code com PKCE e cria ou vincula o usuário. Nenhum token é emitido
+   aqui; o único `Set-Cookie` é o que apaga o cookie de state.
+3. A API responde 302 para `{FRONTEND_URL}/auth/callback?code=<código>` em caso
+   de sucesso, ou para `{FRONTEND_URL}/auth/callback?error=<código>` em caso de
+   falha (tabela abaixo). O cliente web precisa registrar a rota
+   **`/auth/callback`** tratando **os dois** query params. Nenhum token trafega
+   na URL.
+4. Com `code`, o componente dessa rota chama `POST /auth/google/exchange` com
+   `{ "code": "..." }` **e o header `X-Client-Type`**. É aqui que o tipo de
    cliente é declarado e o cookie (web) é setado.
+
+**Cookies de primeira parte durante o redirect.** O passo 1 seta o cookie
+`googleOAuthState` (HttpOnly, `SameSite=Lax`, `Path=/auth/google`, `Secure`
+conforme `COOKIE_SECURE`, 10 minutos), e o browser precisa devolvê-lo no passo 2.
+Ele liga o callback ao browser que iniciou o login (proteção contra login CSRF
+e injeção de `code`, com `state` + PKCE) e é apagado no callback, em qualquer
+desfecho. Se o browser bloquear cookies da API, ou se o usuário levar mais de
+10 minutos na tela do Google, o callback volta com `?error=state_mismatch`. O
+frontend não lê nem envia esse cookie; só não pode impedir o browser de
+guardá-lo. Dois logins iniciados no mesmo browser ao mesmo tempo: vale o
+último, e o callback do primeiro também volta com `state_mismatch`.
+
+### Erros do callback (`?error=`)
+
+Toda falha do callback termina em
+`302 {FRONTEND_URL}/auth/callback?error=<código>`, nunca em JSON na API. O
+código é sempre um destes; nada que o Google manda (`error_description` etc.) é
+repassado.
+
+| `error`              | Quando                                                                                    | O que o frontend faz                                 |
+| -------------------- | ----------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `access_denied`      | O usuário cancelou na tela de consentimento do Google                                     | Volta para a tela de login, sem mensagem de erro     |
+| `email_not_verified` | O Google não garante o email da conta (a conta não é vinculada nem criada)                | Explica que o email da conta Google não é verificado |
+| `state_mismatch`     | Cookie de state ausente, expirado (> 10 min), adulterado, ou `state` divergente           | "Não foi possível concluir o login, tente de novo"   |
+| `oauth_failed`       | Qualquer outra falha: `code` inválido ou expirado, outro `error=` do Google, erro interno | "Não foi possível concluir o login, tente de novo"   |
+
+Trate qualquer outro valor de `error` como `oauth_failed`. Limpe o `error` da
+URL depois de exibir a mensagem.
 
 O código tem exatamente **43 caracteres** do alfabeto `A-Za-z0-9-_` (32 bytes em
 base64url). No banco fica apenas o SHA-256 dele.
@@ -387,9 +420,6 @@ enviado pelo XHR e o fluxo web quebra. Nesse cenário seria necessário
 
 Não implementadas nesta etapa — o cliente não deve contar com elas:
 
-- **Cancelamento no consentimento do Google**: o Passport responde 401 em JSON
-  na URL da API em vez de redirecionar para o frontend. Correção prevista:
-  redirecionar para `{FRONTEND_URL}/auth/callback?error=access_denied`.
 - **Verificação de email e reset de senha** (dependem de envio de email).
 - **Login nativo com Google no Android** (`POST /auth/google/token`
   recebendo o `idToken`). Hoje só existe o fluxo de redirect.
