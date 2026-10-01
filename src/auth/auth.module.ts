@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { SecurityLogModule } from '../security/security-log.module.js';
 import { UsersModule } from '../users/users.module.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
@@ -15,6 +16,7 @@ import { TokenService } from './token.service.js';
 @Module({
   imports: [
     UsersModule,
+    SecurityLogModule,
     // session: false -> sem cookies de sessão do passport; somos 100% token.
     PassportModule.register({ session: false }),
     // Sem opções globais: segredo e expiração são passados a cada sign/verify

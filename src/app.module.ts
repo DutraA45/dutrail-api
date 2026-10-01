@@ -7,6 +7,7 @@ import { AuthModule } from './auth/auth.module.js';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter.js';
 import { EnvironmentVariables, validateEnv } from './config/env.validation.js';
 import { PrismaModule } from './prisma/prisma.module.js';
+import { SecurityLogModule } from './security/security-log.module.js';
 import { UsersModule } from './users/users.module.js';
 
 @Module({
@@ -33,6 +34,8 @@ import { UsersModule } from './users/users.module.js';
       }),
     }),
     PrismaModule,
+    // Para o AllExceptionsFilter (429 e falhas do callback do Google).
+    SecurityLogModule,
     UsersModule,
     AuthModule,
     ActivitiesModule,

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { parse } from 'dotenv';
-import type { TestApp } from './create-app.js';
+import type { TestApp, TestAppOptions } from './create-app.js';
 
 /**
  * Sobe a app com outro ambiente. O ConfigModule lê (e valida) o ambiente
@@ -13,10 +13,12 @@ import type { TestApp } from './create-app.js';
  * não contribui com nada — em especial o DATABASE_URL). Em produção a
  * validação exige credenciais sem trechos de placeholder e segredos JWT de
  * 256 bits: geramos valores aleatórios só para este processo, e religamos o
- * COOKIE_SECURE. `overrides` é aplicado por último.
+ * COOKIE_SECURE. `overrides` é aplicado por último; `appOptions` vai para o
+ * createTestApp (ex.: manter o rate limit).
  */
 export async function createAppWithEnv(
   overrides: Record<string, string> = {},
+  appOptions: TestAppOptions = {},
 ): Promise<TestApp> {
   vi.resetModules();
   vi.unstubAllEnvs();
@@ -41,5 +43,5 @@ export async function createAppWithEnv(
   expect(process.env.DATABASE_URL).toContain('test');
 
   const { createTestApp } = await import('./create-app.js');
-  return createTestApp();
+  return createTestApp(appOptions);
 }

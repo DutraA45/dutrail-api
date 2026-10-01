@@ -4,6 +4,8 @@ import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
+import type { SecurityContext } from '../security/security-context.js';
+import { SecurityLogService } from '../security/security-log.service.js';
 import { TokenService } from './token.service.js';
 
 const env = {
@@ -14,6 +16,7 @@ const env = {
 };
 
 const user = { id: 'user-1', email: 'ana@example.com' };
+const ctx: SecurityContext = { ip: '203.0.113.7', clientType: 'mobile' };
 
 // Só os métodos do Prisma que o TokenService usa. Usar `vi.fn()` por método
 // deixa cada teste dizer exatamente o que o banco "responde".
@@ -32,14 +35,17 @@ describe('TokenService', () => {
   let service: TokenService;
   let jwt: JwtService;
   let prisma: ReturnType<typeof createPrismaMock>;
+  let securityLog: { log: any; warn: any };
 
   beforeEach(async () => {
     prisma = createPrismaMock();
+    securityLog = { log: vi.fn(), warn: vi.fn() };
     const moduleRef = await Test.createTestingModule({
       providers: [
         TokenService,
         JwtService,
         { provide: PrismaService, useValue: prisma },
+        { provide: SecurityLogService, useValue: securityLog },
         {
           provide: ConfigService,
           useValue: { get: (key: keyof typeof env) => env[key] },
@@ -128,7 +134,7 @@ describe('TokenService', () => {
       prisma.refreshToken.updateMany.mockResolvedValue({ count: 1 });
       prisma.refreshToken.create.mockResolvedValue({});
 
-      const pair = await service.rotateRefreshToken(refreshToken);
+      const pair = await service.rotateRefreshToken(refreshToken, ctx);
 
       expect(prisma.refreshToken.updateMany).toHaveBeenCalledWith({
         where: { id: 'rt-1', revokedAt: null },
@@ -136,6 +142,9 @@ describe('TokenService', () => {
       });
       expect(pair.refreshToken).not.toBe(refreshToken);
       expect(prisma.refreshToken.create).toHaveBeenCalledTimes(1);
+      expect(securityLog.log).toHaveBeenCalledWith('refresh_success', ctx, {
+        userId: user.id,
+      });
     });
 
     it('rejeita token com assinatura inválida sem consultar o banco', async () => {
@@ -144,10 +153,27 @@ describe('TokenService', () => {
         { secret: 'outro-segredo', expiresIn: '1d' },
       );
 
-      await expect(service.rotateRefreshToken(forged)).rejects.toBeInstanceOf(
-        UnauthorizedException,
-      );
+      await expect(
+        service.rotateRefreshToken(forged, ctx),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
       expect(prisma.refreshToken.findUnique).not.toHaveBeenCalled();
+      expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
+        reason: 'invalid_jwt',
+      });
+    });
+
+    it('JWT expirado: 401 com reason "expired" no log', async () => {
+      const expired = jwt.sign(
+        { sub: user.id, jti: 'x', exp: Math.floor(Date.now() / 1000) - 10 },
+        { secret: env.JWT_REFRESH_SECRET },
+      );
+
+      await expect(
+        service.rotateRefreshToken(expired, ctx),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
+        reason: 'expired',
+      });
     });
 
     it('rejeita token assinado com o segredo do ACCESS token', async () => {
@@ -156,7 +182,7 @@ describe('TokenService', () => {
         { secret: env.JWT_SECRET, expiresIn: '15m' },
       );
       await expect(
-        service.rotateRefreshToken(wrongKind),
+        service.rotateRefreshToken(wrongKind, ctx),
       ).rejects.toBeInstanceOf(UnauthorizedException);
     });
 
@@ -165,9 +191,13 @@ describe('TokenService', () => {
       prisma.refreshToken.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.rotateRefreshToken(refreshToken),
+        service.rotateRefreshToken(refreshToken, ctx),
       ).rejects.toBeInstanceOf(UnauthorizedException);
       expect(prisma.refreshToken.updateMany).not.toHaveBeenCalled();
+      expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
+        userId: user.id,
+        reason: 'not_found',
+      });
     });
 
     it('detecta reuso: token já revogado derruba todas as sessões do usuário', async () => {
@@ -181,14 +211,19 @@ describe('TokenService', () => {
       });
       prisma.refreshToken.updateMany.mockResolvedValue({ count: 3 });
 
-      await expect(service.rotateRefreshToken(refreshToken)).rejects.toThrow(
-        'reuse',
-      );
+      await expect(
+        service.rotateRefreshToken(refreshToken, ctx),
+      ).rejects.toThrow('reuse');
       expect(prisma.refreshToken.updateMany).toHaveBeenCalledWith({
         where: { userId: user.id, revokedAt: null },
         data: { revokedAt: expect.any(Date) },
       });
       expect(prisma.refreshToken.create).not.toHaveBeenCalled();
+      expect(securityLog.warn).toHaveBeenCalledWith(
+        'refresh_reuse_detected',
+        ctx,
+        { userId: user.id },
+      );
     });
 
     it('rejeita token expirado no banco', async () => {
@@ -201,9 +236,13 @@ describe('TokenService', () => {
         user,
       });
 
-      await expect(service.rotateRefreshToken(refreshToken)).rejects.toThrow(
-        'expired',
-      );
+      await expect(
+        service.rotateRefreshToken(refreshToken, ctx),
+      ).rejects.toThrow('expired');
+      expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
+        userId: user.id,
+        reason: 'expired',
+      });
     });
 
     it('perde a corrida de rotação concorrente (compare-and-set) -> 401', async () => {
@@ -219,9 +258,13 @@ describe('TokenService', () => {
       prisma.refreshToken.updateMany.mockResolvedValue({ count: 0 });
 
       await expect(
-        service.rotateRefreshToken(refreshToken),
+        service.rotateRefreshToken(refreshToken, ctx),
       ).rejects.toBeInstanceOf(UnauthorizedException);
       expect(prisma.refreshToken.create).not.toHaveBeenCalled();
+      expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
+        userId: user.id,
+        reason: 'concurrent_rotation',
+      });
     });
   });
 
@@ -231,18 +274,25 @@ describe('TokenService', () => {
       const { refreshToken } = await service.issueTokenPair(user);
       prisma.refreshToken.deleteMany.mockResolvedValue({ count: 1 });
 
-      await service.revokeRefreshToken(refreshToken);
+      await service.revokeRefreshToken(refreshToken, ctx);
 
       expect(prisma.refreshToken.deleteMany).toHaveBeenCalledWith({
         where: { tokenHash: TokenService.hashToken(refreshToken) },
       });
+      expect(securityLog.log).toHaveBeenCalledWith('logout', ctx, {
+        userId: user.id,
+        reason: undefined,
+      });
     });
 
     it('rejeita token com assinatura inválida', async () => {
-      await expect(service.revokeRefreshToken('a.b.c')).rejects.toBeInstanceOf(
-        UnauthorizedException,
-      );
+      await expect(
+        service.revokeRefreshToken('a.b.c', ctx),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
       expect(prisma.refreshToken.deleteMany).not.toHaveBeenCalled();
+      expect(securityLog.warn).toHaveBeenCalledWith('logout', ctx, {
+        reason: 'invalid_jwt',
+      });
     });
   });
 });

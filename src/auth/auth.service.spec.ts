@@ -2,6 +2,8 @@ import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
+import type { SecurityContext } from '../security/security-context.js';
+import { SecurityLogService } from '../security/security-log.service.js';
 import { UsersService } from '../users/users.service.js';
 import type { User } from '../generated/prisma/client.js';
 import { AuthService } from './auth.service.js';
@@ -9,6 +11,11 @@ import { PasswordService } from './password.service.js';
 import { TokenService } from './token.service.js';
 
 const tokens = { accessToken: 'access', refreshToken: 'refresh' };
+const ctx: SecurityContext = {
+  ip: '203.0.113.7',
+  userAgent: 'vitest',
+  clientType: 'mobile',
+};
 
 function makeUser(overrides: Partial<User> = {}): User {
   return {
@@ -47,6 +54,7 @@ describe('AuthService', () => {
     refreshToken: { deleteMany: any };
     oAuthExchangeCode: { deleteMany: any };
   };
+  let securityLog: { log: any; warn: any };
 
   beforeEach(async () => {
     users = {
@@ -77,6 +85,7 @@ describe('AuthService', () => {
       refreshToken: { deleteMany: vi.fn() },
       oAuthExchangeCode: { deleteMany: vi.fn() },
     };
+    securityLog = { log: vi.fn(), warn: vi.fn() };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -85,6 +94,7 @@ describe('AuthService', () => {
         { provide: PasswordService, useValue: password },
         { provide: TokenService, useValue: tokenService },
         { provide: PrismaService, useValue: prisma },
+        { provide: SecurityLogService, useValue: securityLog },
       ],
     }).compile();
 
@@ -101,6 +111,7 @@ describe('AuthService', () => {
         'ana@example.com',
         'S3nh@Forte!',
         'Ana',
+        ctx,
       );
 
       expect(password.hash).toHaveBeenCalledWith('S3nh@Forte!');
@@ -115,13 +126,18 @@ describe('AuthService', () => {
       );
       expect(tokenService.issueTokenPair).toHaveBeenCalledWith(created);
       expect(result).toEqual({ ...tokens, user: created });
+      // O email vai em claro para o serviço de log, que é quem mascara.
+      expect(securityLog.log).toHaveBeenCalledWith('signup', ctx, {
+        userId: 'user-1',
+        email: 'ana@example.com',
+      });
     });
 
     it('rejeita email já cadastrado com 409', async () => {
       users.findByEmail.mockResolvedValue(makeUser());
 
       await expect(
-        service.signup('ana@example.com', 'S3nh@Forte!'),
+        service.signup('ana@example.com', 'S3nh@Forte!', undefined, ctx),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(users.create).not.toHaveBeenCalled();
     });
@@ -133,32 +149,45 @@ describe('AuthService', () => {
       users.findByEmail.mockResolvedValue(user);
       password.verify.mockResolvedValue(true);
 
-      const result = await service.login('ana@example.com', 'S3nh@Forte!');
+      const result = await service.login('ana@example.com', 'S3nh@Forte!', ctx);
 
       expect(password.verify).toHaveBeenCalledWith(
         'hash-da-senha',
         'S3nh@Forte!',
       );
       expect(result).toEqual({ ...tokens, user });
+      expect(securityLog.log).toHaveBeenCalledWith('login_success', ctx, {
+        userId: 'user-1',
+      });
     });
 
     it('rejeita senha errada com 401 genérico', async () => {
       users.findByEmail.mockResolvedValue(makeUser());
       password.verify.mockResolvedValue(false);
 
-      await expect(service.login('ana@example.com', 'errada')).rejects.toThrow(
-        'Invalid credentials',
-      );
+      await expect(
+        service.login('ana@example.com', 'errada', ctx),
+      ).rejects.toThrow('Invalid credentials');
       expect(tokenService.issueTokenPair).not.toHaveBeenCalled();
+      expect(securityLog.warn).toHaveBeenCalledWith('login_failed', ctx, {
+        userId: 'user-1',
+        email: 'ana@example.com',
+        reason: 'wrong_password',
+      });
     });
 
     it('rejeita email desconhecido com o MESMO 401, ainda gastando tempo de hash', async () => {
       users.findByEmail.mockResolvedValue(null);
       password.verify.mockResolvedValue(false);
 
-      await expect(service.login('ninguem@example.com', 'x')).rejects.toThrow(
-        'Invalid credentials',
-      );
+      await expect(
+        service.login('ninguem@example.com', 'x', ctx),
+      ).rejects.toThrow('Invalid credentials');
+      expect(securityLog.warn).toHaveBeenCalledWith('login_failed', ctx, {
+        userId: undefined,
+        email: 'ninguem@example.com',
+        reason: 'unknown_email',
+      });
       // Verificação contra um hash "dummy": evita revelar por timing que o
       // email não existe.
       expect(password.hash).toHaveBeenCalledTimes(1);
@@ -174,8 +203,13 @@ describe('AuthService', () => {
       password.verify.mockResolvedValue(true);
 
       await expect(
-        service.login('ana@example.com', 'qualquer'),
+        service.login('ana@example.com', 'qualquer', ctx),
       ).rejects.toThrow('Invalid credentials');
+      expect(securityLog.warn).toHaveBeenCalledWith(
+        'login_failed',
+        ctx,
+        expect.objectContaining({ reason: 'no_password' }),
+      );
     });
   });
 
@@ -192,7 +226,7 @@ describe('AuthService', () => {
       const user = makeUser({ googleId: 'g-123' });
       users.findByGoogleId.mockResolvedValue(user);
 
-      await expect(service.loginWithGoogle(profile)).resolves.toBe(user);
+      await expect(service.loginWithGoogle(profile, ctx)).resolves.toBe(user);
       expect(users.findByEmail).not.toHaveBeenCalled();
       expect(users.create).not.toHaveBeenCalled();
     });
@@ -208,7 +242,7 @@ describe('AuthService', () => {
       const linked = makeUser({ googleId: 'g-123', emailVerified: true });
       users.linkGoogleAccount.mockResolvedValue(linked);
 
-      await expect(service.loginWithGoogle(profile)).resolves.toBe(linked);
+      await expect(service.loginWithGoogle(profile, ctx)).resolves.toBe(linked);
       // Mantém o nome que o usuário já tinha; preenche só o que faltava.
       expect(users.linkGoogleAccount).toHaveBeenCalledWith('user-1', {
         googleId: 'g-123',
@@ -217,6 +251,10 @@ describe('AuthService', () => {
       });
       expect(prisma.$transaction).not.toHaveBeenCalled();
       expect(users.create).not.toHaveBeenCalled();
+      expect(securityLog.log).toHaveBeenCalledWith('google_link', ctx, {
+        userId: 'user-1',
+        reason: 'verified_account',
+      });
     });
 
     it('conta com email não verificado: descarta senha e sessões na mesma transação (A-01)', async () => {
@@ -231,7 +269,7 @@ describe('AuthService', () => {
       });
       users.linkGoogleAccount.mockResolvedValue(linked);
 
-      await expect(service.loginWithGoogle(profile)).resolves.toBe(linked);
+      await expect(service.loginWithGoogle(profile, ctx)).resolves.toBe(linked);
       expect(prisma.$transaction).toHaveBeenCalledTimes(1);
       expect(tx.refreshToken.deleteMany).toHaveBeenCalledWith({
         where: { userId: 'user-1' },
@@ -256,13 +294,17 @@ describe('AuthService', () => {
       expect(
         tx.oAuthExchangeCode.deleteMany.mock.invocationCallOrder[0],
       ).toBeLessThan(users.linkGoogleAccount.mock.invocationCallOrder[0]);
+      expect(securityLog.warn).toHaveBeenCalledWith('google_link', ctx, {
+        userId: 'user-1',
+        reason: 'unverified_takeover',
+      });
     });
 
     it('NÃO vincula se o Google não verificou o email (evita sequestro de conta)', async () => {
       users.findByGoogleId.mockResolvedValue(null);
 
       await expect(
-        service.loginWithGoogle({ ...profile, emailVerified: false }),
+        service.loginWithGoogle({ ...profile, emailVerified: false }, ctx),
       ).rejects.toBeInstanceOf(UnauthorizedException);
       expect(users.findByEmail).not.toHaveBeenCalled();
       expect(users.linkGoogleAccount).not.toHaveBeenCalled();
@@ -279,7 +321,9 @@ describe('AuthService', () => {
       });
       users.create.mockResolvedValue(created);
 
-      await expect(service.loginWithGoogle(profile)).resolves.toBe(created);
+      await expect(service.loginWithGoogle(profile, ctx)).resolves.toBe(
+        created,
+      );
       expect(users.create).toHaveBeenCalledWith({
         email: 'ana@example.com',
         googleId: 'g-123',
@@ -316,19 +360,25 @@ describe('AuthService', () => {
       });
       prisma.oAuthExchangeCode.updateMany.mockResolvedValue({ count: 1 });
 
-      const result = await service.exchangeCode('a'.repeat(43));
+      const result = await service.exchangeCode('a'.repeat(43), ctx);
 
       expect(prisma.oAuthExchangeCode.updateMany).toHaveBeenCalledWith({
         where: { id: 'code-1', usedAt: null },
         data: { usedAt: expect.any(Date) },
       });
       expect(result).toEqual({ ...tokens, user });
+      expect(securityLog.log).toHaveBeenCalledWith(
+        'google_exchange_success',
+        ctx,
+        { userId: 'user-1' },
+      );
     });
 
     it.each([
-      ['desconhecido', null],
+      ['desconhecido', 'not_found', null],
       [
         'já usado',
+        'used',
         {
           id: 'c',
           usedAt: new Date(),
@@ -338,6 +388,7 @@ describe('AuthService', () => {
       ],
       [
         'expirado',
+        'expired',
         {
           id: 'c',
           usedAt: null,
@@ -345,13 +396,18 @@ describe('AuthService', () => {
           user: makeUser(),
         },
       ],
-    ])('rejeita código %s com 401', async (_label, stored) => {
+    ])('rejeita código %s com 401', async (_label, reason, stored) => {
       prisma.oAuthExchangeCode.findUnique.mockResolvedValue(stored);
 
-      await expect(service.exchangeCode('a'.repeat(43))).rejects.toBeInstanceOf(
-        UnauthorizedException,
-      );
+      await expect(
+        service.exchangeCode('a'.repeat(43), ctx),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
       expect(tokenService.issueTokenPair).not.toHaveBeenCalled();
+      expect(securityLog.warn).toHaveBeenCalledWith(
+        'google_exchange_failed',
+        ctx,
+        expect.objectContaining({ reason }),
+      );
     });
 
     it('rejeita quando outro request usou o código primeiro (compare-and-set)', async () => {
@@ -363,19 +419,19 @@ describe('AuthService', () => {
       });
       prisma.oAuthExchangeCode.updateMany.mockResolvedValue({ count: 0 });
 
-      await expect(service.exchangeCode('a'.repeat(43))).rejects.toBeInstanceOf(
-        UnauthorizedException,
-      );
+      await expect(
+        service.exchangeCode('a'.repeat(43), ctx),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
       expect(tokenService.issueTokenPair).not.toHaveBeenCalled();
     });
   });
 
   it('refresh e logout delegam ao TokenService', async () => {
     tokenService.rotateRefreshToken.mockResolvedValue(tokens);
-    await expect(service.refresh('rt')).resolves.toEqual(tokens);
-    expect(tokenService.rotateRefreshToken).toHaveBeenCalledWith('rt');
+    await expect(service.refresh('rt', ctx)).resolves.toEqual(tokens);
+    expect(tokenService.rotateRefreshToken).toHaveBeenCalledWith('rt', ctx);
 
-    await service.logout('rt');
-    expect(tokenService.revokeRefreshToken).toHaveBeenCalledWith('rt');
+    await service.logout('rt', ctx);
+    expect(tokenService.revokeRefreshToken).toHaveBeenCalledWith('rt', ctx);
   });
 });

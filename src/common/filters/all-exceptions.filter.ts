@@ -9,8 +9,17 @@ import {
   Logger,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import type { AuthenticatedUser } from '../../auth/interfaces/authenticated-user.interface.js';
 import { Prisma } from '../../generated/prisma/client.js';
+import {
+  declaredClientType,
+  securityContextFrom,
+} from '../../security/security-context.js';
+import { SecurityLogService } from '../../security/security-log.service.js';
 import { ErrorResponseDto } from '../dto/error-response.dto.js';
+
+/** Rota de retorno do Google; as falhas dela só aparecem aqui (A-07). */
+const GOOGLE_CALLBACK_PATH = '/auth/google/callback';
 
 /**
  * Filtro global: converte QUALQUER exceção no formato padrão ErrorResponseDto.
@@ -19,10 +28,16 @@ import { ErrorResponseDto } from '../dto/error-response.dto.js';
  * - Erros conhecidos do Prisma: traduz os casos úteis (P2002 = unique).
  * - Qualquer outra coisa: 500 genérico. A mensagem original vai só para o
  *   log, nunca para o cliente (poderia vazar detalhes internos).
+ *
+ * Também é o ponto que enxerga o 429 do ThrottlerGuard e as falhas do callback
+ * do Google (que acontecem no guard do passport, antes de qualquer service),
+ * por isso registra esses dois eventos de segurança.
  */
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  constructor(private readonly securityLog: SecurityLogService) {}
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
@@ -40,6 +55,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
         exception instanceof Error ? exception.stack : String(exception),
       );
     }
+    this.recordSecurityEvent(request, status);
 
     const body: ErrorResponseDto = {
       statusCode: status,
@@ -50,6 +66,32 @@ export class AllExceptionsFilter implements ExceptionFilter {
     };
 
     response.status(status).json(body);
+  }
+
+  private recordSecurityEvent(request: Request, status: number): void {
+    if (status === HttpStatus.TOO_MANY_REQUESTS) {
+      const user = request.user as AuthenticatedUser | undefined;
+      this.securityLog.warn(
+        'rate_limited',
+        securityContextFrom(request, declaredClientType(request)),
+        { userId: user?.userId },
+      );
+      return;
+    }
+
+    // 401: o Google negou/cancelou ou o email não é verificado. 5xx: `code`
+    // inválido ou erro inesperado. O `code` e o `state` da URL não entram.
+    if (
+      request.path === GOOGLE_CALLBACK_PATH &&
+      (status === HttpStatus.UNAUTHORIZED ||
+        status >= HttpStatus.INTERNAL_SERVER_ERROR)
+    ) {
+      this.securityLog.warn(
+        'google_exchange_failed',
+        securityContextFrom(request),
+        { reason: 'callback_error' },
+      );
+    }
   }
 
   private toHttpException(exception: unknown): HttpException {

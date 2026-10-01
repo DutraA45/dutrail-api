@@ -1,10 +1,12 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
+import { JwtService, TokenExpiredError } from '@nestjs/jwt';
 import { createHash, randomUUID } from 'node:crypto';
 import { EnvironmentVariables } from '../config/env.validation.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { RefreshToken } from '../generated/prisma/client.js';
+import type { SecurityContext } from '../security/security-context.js';
+import { SecurityLogService } from '../security/security-log.service.js';
 import type {
   AccessTokenPayload,
   RefreshTokenPayload,
@@ -16,6 +18,10 @@ export interface TokenPair {
   /** `exp` do refresh token emitido; o mesmo prazo gravado no banco. */
   refreshTokenExpiresAt: Date;
 }
+
+/** Resultado da checagem do JWT: o payload, ou o motivo (para o log) da recusa. */
+type RefreshJwtCheck =
+  { payload: RefreshTokenPayload } | { reason: 'invalid_jwt' | 'expired' };
 
 /**
  * Emissão, rotação e revogação de tokens.
@@ -34,6 +40,7 @@ export class TokenService {
     private readonly jwt: JwtService,
     private readonly prisma: PrismaService,
     private readonly config: ConfigService<EnvironmentVariables, true>,
+    private readonly securityLog: SecurityLogService,
   ) {}
 
   /**
@@ -86,8 +93,11 @@ export class TokenService {
    * Rotação: valida o refresh token recebido, revoga-o atomicamente e devolve
    * um par novo. Qualquer falha vira o mesmo 401 genérico para não dar pistas.
    */
-  async rotateRefreshToken(refreshToken: string): Promise<TokenPair> {
-    const stored = await this.findValidRefreshToken(refreshToken);
+  async rotateRefreshToken(
+    refreshToken: string,
+    ctx: SecurityContext,
+  ): Promise<TokenPair> {
+    const stored = await this.findValidRefreshToken(refreshToken, ctx);
 
     // Compare-and-set: só quem conseguir marcar `revokedAt` (de null para
     // agora) segue em frente. Se dois requests concorrentes usarem o mesmo
@@ -97,10 +107,16 @@ export class TokenService {
       data: { revokedAt: new Date() },
     });
     if (count === 0) {
+      this.securityLog.warn('refresh_invalid', ctx, {
+        userId: stored.userId,
+        reason: 'concurrent_rotation',
+      });
       throw new UnauthorizedException('Invalid refresh token');
     }
 
-    return this.issueTokenPair(stored.user);
+    const pair = await this.issueTokenPair(stored.user);
+    this.securityLog.log('refresh_success', ctx, { userId: stored.userId });
+    return pair;
   }
 
   /**
@@ -112,10 +128,22 @@ export class TokenService {
    * a detecção de reuso — que derrubaria as outras sessões do usuário por
    * causa de, digamos, um retry do cliente web.
    */
-  async revokeRefreshToken(refreshToken: string): Promise<void> {
-    this.verifyRefreshJwt(refreshToken);
-    await this.prisma.refreshToken.deleteMany({
+  async revokeRefreshToken(
+    refreshToken: string,
+    ctx: SecurityContext,
+  ): Promise<void> {
+    const check = this.verifyRefreshJwt(refreshToken);
+    if ('reason' in check) {
+      this.securityLog.warn('logout', ctx, { reason: check.reason });
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    const { count } = await this.prisma.refreshToken.deleteMany({
       where: { tokenHash: TokenService.hashToken(refreshToken) },
+    });
+    this.securityLog.log('logout', ctx, {
+      userId: check.payload.sub,
+      reason: count === 0 ? 'not_found' : undefined,
     });
   }
 
@@ -133,8 +161,13 @@ export class TokenService {
    */
   private async findValidRefreshToken(
     refreshToken: string,
+    ctx: SecurityContext,
   ): Promise<RefreshToken & { user: { id: string; email: string } }> {
-    this.verifyRefreshJwt(refreshToken);
+    const check = this.verifyRefreshJwt(refreshToken);
+    if ('reason' in check) {
+      this.securityLog.warn('refresh_invalid', ctx, { reason: check.reason });
+      throw new UnauthorizedException('Invalid refresh token');
+    }
 
     const stored = await this.prisma.refreshToken.findUnique({
       where: { tokenHash: TokenService.hashToken(refreshToken) },
@@ -142,6 +175,12 @@ export class TokenService {
     });
 
     if (!stored) {
+      // A assinatura é válida, então o `sub` é confiável: ajuda a ligar o
+      // evento ao usuário (ex.: token apagado no logout sendo reenviado).
+      this.securityLog.warn('refresh_invalid', ctx, {
+        userId: check.payload.sub,
+        reason: 'not_found',
+      });
       throw new UnauthorizedException('Invalid refresh token');
     }
 
@@ -150,24 +189,36 @@ export class TokenService {
       // legítimo está reenviando um token antigo (bug), ou alguém roubou o
       // token e o legítimo já o rotacionou. Nos dois casos, a única resposta
       // segura é invalidar todas as sessões e forçar novo login.
+      // Registrado antes da revogação: se ela falhar, o evento não se perde.
+      this.securityLog.warn('refresh_reuse_detected', ctx, {
+        userId: stored.userId,
+      });
       await this.revokeAllForUser(stored.userId);
       throw new UnauthorizedException('Refresh token reuse detected');
     }
 
     if (stored.expiresAt.getTime() <= Date.now()) {
+      this.securityLog.warn('refresh_invalid', ctx, {
+        userId: stored.userId,
+        reason: 'expired',
+      });
       throw new UnauthorizedException('Refresh token expired');
     }
 
     return stored;
   }
 
-  private verifyRefreshJwt(refreshToken: string): RefreshTokenPayload {
+  /** Não lança: quem chama registra o motivo e responde o 401. */
+  private verifyRefreshJwt(refreshToken: string): RefreshJwtCheck {
     try {
-      return this.jwt.verify<RefreshTokenPayload>(refreshToken, {
+      const payload = this.jwt.verify<RefreshTokenPayload>(refreshToken, {
         secret: this.config.get('JWT_REFRESH_SECRET', { infer: true }),
       });
-    } catch {
-      throw new UnauthorizedException('Invalid refresh token');
+      return { payload };
+    } catch (err) {
+      return {
+        reason: err instanceof TokenExpiredError ? 'expired' : 'invalid_jwt',
+      };
     }
   }
 }

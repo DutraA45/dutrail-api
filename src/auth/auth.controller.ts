@@ -33,6 +33,8 @@ import { Public } from '../common/decorators/public.decorator.js';
 import { ErrorResponseDto } from '../common/dto/error-response.dto.js';
 import { EnvironmentVariables } from '../config/env.validation.js';
 import type { User } from '../generated/prisma/client.js';
+import { securityContextFrom } from '../security/security-context.js';
+import { SecurityLogService } from '../security/security-log.service.js';
 import { AuthService, type AuthResult } from './auth.service.js';
 import {
   ApiAuthResponse,
@@ -64,6 +66,9 @@ const CLIENT_TYPE_ERROR =
 // Todas as rotas deste controller são @Public(): quem "autentica" aqui é a
 // própria credencial enviada (senha, refresh token, código do Google).
 //
+// Cada handler monta o SecurityContext (ip, user-agent, client type) a partir
+// do `req` e o passa aos services, que registram os eventos de segurança.
+//
 // O refresh token muda de canal conforme o X-Client-Type (cookie httpOnly para
 // web, corpo JSON para mobile). Só a entrega/leitura muda: rotação, detecção de
 // reuso e revogação são as mesmas para os dois, no TokenService.
@@ -74,6 +79,7 @@ export class AuthController {
     private readonly authService: AuthService,
     private readonly transport: RefreshTokenTransport,
     private readonly config: ConfigService<EnvironmentVariables, true>,
+    private readonly securityLog: SecurityLogService,
   ) {}
 
   @Public()
@@ -97,12 +103,14 @@ export class AuthController {
   async signup(
     @Body() dto: SignupDto,
     @ClientType() clientType: ClientType,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthWebResponseDto | AuthMobileResponseDto> {
     const result = await this.authService.signup(
       dto.email,
       dto.password,
       dto.name,
+      securityContextFrom(req, clientType),
     );
     return this.respondWithTokens(result, clientType, res);
   }
@@ -129,9 +137,14 @@ export class AuthController {
   async login(
     @Body() dto: LoginDto,
     @ClientType() clientType: ClientType,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthWebResponseDto | AuthMobileResponseDto> {
-    const result = await this.authService.login(dto.email, dto.password);
+    const result = await this.authService.login(
+      dto.email,
+      dto.password,
+      securityContextFrom(req, clientType),
+    );
     return this.respondWithTokens(result, clientType, res);
   }
 
@@ -160,14 +173,18 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AccessTokenDto | TokenPairDto> {
+    const ctx = securityContextFrom(req, clientType);
     const refreshToken = this.transport.read(clientType, req, dto.refreshToken);
     if (refreshToken === undefined) {
       // Canal certo, mas vazio (cookie expirado/nunca setado, ou body sem o
       // campo): é falta de credencial, então 401 — o cliente deve refazer login.
+      this.securityLog.warn('refresh_invalid', ctx, {
+        reason: 'missing_token',
+      });
       throw new UnauthorizedException('Missing refresh token');
     }
 
-    const tokens = await this.authService.refresh(refreshToken);
+    const tokens = await this.authService.refresh(refreshToken, ctx);
     const bodyToken = this.transport.deliver(clientType, res, tokens);
 
     return bodyToken === undefined
@@ -202,12 +219,15 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<void> {
+    const ctx = securityContextFrom(req, clientType);
     const refreshToken = this.transport.read(clientType, req, dto.refreshToken);
 
     // Logout é idempotente: sem token no canal certo não há o que revogar,
     // mas o cookie (se houver) ainda é apagado.
     if (refreshToken !== undefined) {
-      await this.authService.logout(refreshToken);
+      await this.authService.logout(refreshToken, ctx);
+    } else {
+      this.securityLog.log('logout', ctx, { reason: 'no_token' });
     }
     this.transport.clear(clientType, res);
   }
@@ -239,6 +259,9 @@ export class AuthController {
    * `req.user` é o usuário criado/vinculado. Em vez de colocar tokens na URL
    * (histórico do browser, logs de proxy), geramos um código de uso único e
    * o frontend o troca por tokens em POST /auth/google/exchange.
+   *
+   * Falhas (401/5xx) acontecem no guard, antes deste método, e são
+   * registradas pelo AllExceptionsFilter como `google_exchange_failed`.
    */
   @Public()
   @Get('google/callback')
@@ -272,9 +295,13 @@ export class AuthController {
   async googleExchange(
     @Body() dto: ExchangeCodeDto,
     @ClientType() clientType: ClientType,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthWebResponseDto | AuthMobileResponseDto> {
-    const result = await this.authService.exchangeCode(dto.code);
+    const result = await this.authService.exchangeCode(
+      dto.code,
+      securityContextFrom(req, clientType),
+    );
     return this.respondWithTokens(result, clientType, res);
   }
 

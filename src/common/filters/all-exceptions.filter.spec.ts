@@ -4,16 +4,35 @@ import {
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ThrottlerException } from '@nestjs/throttler';
 import { Prisma } from '../../generated/prisma/client.js';
+import type { SecurityLogService } from '../../security/security-log.service.js';
 import { AllExceptionsFilter } from './all-exceptions.filter.js';
 
+interface FakeRequest {
+  method: string;
+  url: string;
+  path: string;
+  ip?: string;
+  headers?: Record<string, string>;
+  user?: { userId: string; email: string };
+}
+
 function createHost(
-  req: { method: string; url: string; path: string } = {
+  partial: Partial<FakeRequest> = {
     method: 'POST',
     url: '/auth/login',
     path: '/auth/login',
   },
 ) {
+  const req: FakeRequest = {
+    method: 'POST',
+    url: '/auth/login',
+    path: '/auth/login',
+    ip: '203.0.113.7',
+    headers: {},
+    ...partial,
+  };
   const response = { status: vi.fn().mockReturnThis(), json: vi.fn() };
   const host = {
     switchToHttp: () => ({
@@ -25,13 +44,20 @@ function createHost(
 }
 
 describe('AllExceptionsFilter', () => {
-  const filter = new AllExceptionsFilter();
+  const securityLog = { log: vi.fn(), warn: vi.fn() };
+  const filter = new AllExceptionsFilter(
+    securityLog as unknown as SecurityLogService,
+  );
 
   // O filtro loga erros 500 de propósito; não queremos o stack no output do teste.
   const logError = vi
     .spyOn(Logger.prototype, 'error')
     .mockImplementation(() => undefined);
-  beforeEach(() => logError.mockClear());
+  beforeEach(() => {
+    logError.mockClear();
+    securityLog.log.mockClear();
+    securityLog.warn.mockClear();
+  });
   afterAll(() => vi.restoreAllMocks());
 
   it('mantém status e mensagens de uma HttpException (ex.: validação)', () => {
@@ -105,6 +131,87 @@ describe('AllExceptionsFilter', () => {
     expect(response.json.mock.calls[0][0]).toMatchObject({
       statusCode: 401,
       error: 'Unauthorized',
+    });
+  });
+
+  describe('eventos de segurança (A-07)', () => {
+    const callback = {
+      method: 'GET',
+      url: '/auth/google/callback?code=abc123&state=st4te987',
+      path: '/auth/google/callback',
+    };
+
+    it('429 vira rate_limited, com ip, user-agent e client type válido', () => {
+      const { host, response } = createHost({
+        headers: { 'user-agent': 'curl/8', 'x-client-type': 'mobile' },
+      });
+      filter.catch(new ThrottlerException(), host);
+
+      expect(response.status).toHaveBeenCalledWith(429);
+      expect(securityLog.warn).toHaveBeenCalledWith(
+        'rate_limited',
+        { ip: '203.0.113.7', userAgent: 'curl/8', clientType: 'mobile' },
+        { userId: undefined },
+      );
+    });
+
+    it('429 ignora X-Client-Type inválido e inclui o usuário autenticado', () => {
+      const { host } = createHost({
+        path: '/activities',
+        url: '/activities',
+        headers: { 'x-client-type': 'desktop' },
+        user: { userId: 'user-1', email: 'ana@example.com' },
+      });
+      filter.catch(new ThrottlerException(), host);
+
+      expect(securityLog.warn).toHaveBeenCalledWith(
+        'rate_limited',
+        expect.objectContaining({ clientType: undefined }),
+        { userId: 'user-1' },
+      );
+    });
+
+    it.each([
+      ['401', new UnauthorizedException()],
+      ['500', new Error('TokenError: bad code')],
+    ])(
+      'falha %s no callback do Google vira google_exchange_failed/callback_error',
+      (_status, error) => {
+        const { host } = createHost(callback);
+        filter.catch(error, host);
+
+        expect(securityLog.warn).toHaveBeenCalledTimes(1);
+        expect(securityLog.warn).toHaveBeenCalledWith(
+          'google_exchange_failed',
+          expect.objectContaining({ ip: '203.0.113.7' }),
+          { reason: 'callback_error' },
+        );
+        // Nem o code nem o state chegam ao log de segurança.
+        const logged = JSON.stringify(securityLog.warn.mock.calls);
+        expect(logged).not.toContain('abc123');
+        expect(logged).not.toContain('st4te987');
+      },
+    );
+
+    it('não registra outros erros (400 no callback, 401 fora dele)', () => {
+      filter.catch(new BadRequestException(), createHost(callback).host);
+      filter.catch(new UnauthorizedException(), createHost().host);
+
+      expect(securityLog.warn).not.toHaveBeenCalled();
+      expect(securityLog.log).not.toHaveBeenCalled();
+    });
+
+    it('não altera a resposta ao cliente', () => {
+      const { host, response } = createHost(callback);
+      filter.catch(new UnauthorizedException(), host);
+
+      expect(response.json).toHaveBeenCalledWith({
+        statusCode: 401,
+        error: 'Unauthorized',
+        message: 'Unauthorized',
+        path: callback.url,
+        timestamp: expect.any(String),
+      });
     });
   });
 });

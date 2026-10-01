@@ -22,6 +22,10 @@ export interface TestApp {
   close(): Promise<void>;
 }
 
+export interface TestAppOptions {
+  keepThrottling?: boolean;
+}
+
 /**
  * Sobe a aplicação completa (módulos reais, banco real) com três substituições:
  * - GoogleStrategy -> FakeGoogleStrategy (não chama o Google);
@@ -30,7 +34,7 @@ export interface TestApp {
  *   no teste específico de rate limit).
  */
 export async function createTestApp(
-  options: { keepThrottling?: boolean } = {},
+  options: TestAppOptions = {},
 ): Promise<TestApp> {
   const storage = new FakeActivityFileStorage();
   let builder: TestingModuleBuilder = Test.createTestingModule({

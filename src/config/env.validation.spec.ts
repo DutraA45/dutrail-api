@@ -162,6 +162,25 @@ describe('validateEnv', () => {
     });
   });
 
+  describe('SECURITY_LOG_ENABLED', () => {
+    const { SECURITY_LOG_ENABLED: _omitted, ...withoutFlag } = exampleEnv;
+
+    it('é true por padrão (variável ausente)', () => {
+      expect(validateEnv(withoutFlag).SECURITY_LOG_ENABLED).toBe(true);
+    });
+
+    it('o .env.example liga e o .env.test desliga', () => {
+      expect(validateEnv(exampleEnv).SECURITY_LOG_ENABLED).toBe(true);
+      expect(validateEnv(testEnv).SECURITY_LOG_ENABLED).toBe(false);
+    });
+
+    it.each(['yes', '0', ''])('recusa "%s": só true ou false', (value) => {
+      expect(
+        validationMessage({ ...exampleEnv, SECURITY_LOG_ENABLED: value }),
+      ).toMatch(/SECURITY_LOG_ENABLED deve ser "true" ou "false"/);
+    });
+  });
+
   describe('production', () => {
     it('aceita segredos aleatórios de 48 bytes em base64url', () => {
       const env = validateEnv(productionEnv());

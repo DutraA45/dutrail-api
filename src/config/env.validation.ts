@@ -47,6 +47,12 @@ export class EnvironmentVariables {
   @IsBoolean({ message: 'COOKIE_SECURE deve ser "true" ou "false"' })
   COOKIE_SECURE: boolean = true;
 
+  // Log de eventos de segurança (A-07). Ligado por padrão; o .env.test o
+  // desliga para não poluir a saída, e os testes do log o religam.
+  @Transform(({ obj, key }) => parseBooleanFlag(obj[key]))
+  @IsBoolean({ message: 'SECURITY_LOG_ENABLED deve ser "true" ou "false"' })
+  SECURITY_LOG_ENABLED: boolean = true;
+
   @IsString()
   @IsNotEmpty()
   DATABASE_URL: string;
