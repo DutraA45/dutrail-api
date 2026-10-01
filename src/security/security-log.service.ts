@@ -9,6 +9,7 @@ export const SECURITY_EVENTS = [
   'login_failed',
   'refresh_success',
   'refresh_invalid',
+  'refresh_grace_used',
   'refresh_reuse_detected',
   'logout',
   'google_link',
@@ -33,7 +34,6 @@ export type SecurityReason =
   | 'invalid_jwt'
   | 'expired'
   | 'not_found'
-  | 'concurrent_rotation'
   | 'no_token'
   // google_link
   | 'verified_account'
@@ -53,6 +53,11 @@ export interface SecurityEventDetails {
   /** Email em claro: o serviço só registra a versão mascarada. */
   email?: string;
   reason?: SecurityReason;
+  /**
+   * Família do refresh token (A-04): um uuid opaco, gerado no login, que
+   * liga os eventos de uma mesma sessão. Não é credencial.
+   */
+  familyId?: string;
 }
 
 /** Uma linha do log. Campos `undefined` somem no JSON. */
@@ -65,6 +70,7 @@ export interface SecurityLogEntry {
   clientType?: string;
   emailMasked?: string;
   reason?: SecurityReason;
+  familyId?: string;
 }
 
 export const SECURITY_LOG_CONTEXT = 'SecurityLog';
@@ -93,8 +99,8 @@ export function maskEmail(email: string): string {
  * pelo Logger do Nest, com contexto `SecurityLog`.
  *
  * Nunca recebe senha, token, código de troca, hash nem URL: a assinatura só
- * aceita o contexto da request, o userId, o email (mascarado aqui) e um motivo
- * fixo. `warn` para falhas e suspeitas, `log` para sucessos.
+ * aceita o contexto da request, o userId, o email (mascarado aqui), um motivo
+ * fixo e o familyId do refresh token. `warn` para falhas e suspeitas, `log` para sucessos.
  */
 @Injectable()
 export class SecurityLogService {
@@ -138,6 +144,7 @@ export class SecurityLogService {
       emailMasked:
         details.email === undefined ? undefined : maskEmail(details.email),
       reason: details.reason,
+      familyId: details.familyId,
     };
   }
 }

@@ -58,6 +58,11 @@ describe.each(CLIENT_TYPES)(
       return res;
     }
 
+    const rowOf = (token: string) =>
+      t.prisma.refreshToken.findUniqueOrThrow({
+        where: { tokenHash: TokenService.hashToken(token) },
+      });
+
     describe('POST /auth/signup', () => {
       it('cria o usuário e entrega o refresh token apenas pelo canal do cliente', async () => {
         const res = await signup();
@@ -118,25 +123,51 @@ describe.each(CLIENT_TYPES)(
           .get('/me')
           .set('Authorization', `Bearer ${res.body.accessToken}`)
           .expect(200);
-        // ...e o refresh token antigo não.
-        await c.refreshWith(firstToken).expect(401);
+        // ...e o refresh token antigo fica rotacionado, na mesma família,
+        // apontando para o sucessor. Reapresentá-lo agora cairia na janela de
+        // tolerância (test/refresh-token-families.e2e-spec.ts).
+        const old = await rowOf(firstToken);
+        const next = await rowOf(c.refreshTokenOf(res)!);
+        expect(old).toMatchObject({
+          familyId: next.familyId,
+          successorId: next.id,
+          revokedAt: expect.any(Date),
+          rotatedAt: expect.any(Date),
+          graceUsedAt: null,
+        });
+        expect(next).toMatchObject({
+          revokedAt: null,
+          rotatedAt: null,
+          successorId: null,
+        });
       });
 
-      it('reuso de token rotacionado derruba todas as sessões', async () => {
+      it('reuso de token rotacionado derruba só a sessão daquele dispositivo (família)', async () => {
         const first = await signup();
         const firstToken = c.refreshTokenOf(first)!;
-        const second = await c.refresh(firstToken).expect(200);
-        const secondToken = c.refreshTokenOf(second)!;
+        // Outro dispositivo do mesmo usuário: outra família.
+        const other = createClient(t.app, clientType);
+        const otherLogin = await other
+          .post('/auth/login')
+          .send(loginBody)
+          .expect(200);
+        const second = await c.refreshWith(firstToken).expect(200);
+        const third = await c
+          .refreshWith(c.refreshTokenOf(second)!)
+          .expect(200);
+        const familyId = (await rowOf(firstToken)).familyId;
 
-        // Mesma mensagem de qualquer token recusado (A-18): quem reapresenta
-        // um token roubado não fica sabendo que o reuso foi detectado.
+        // O sucessor já rotacionou de novo: o token antigo só pode ser uma
+        // cópia. Mesma mensagem de qualquer token recusado (A-18): quem
+        // reapresenta um token roubado não fica sabendo do reuso.
         const reuse = await c.refreshWith(firstToken).expect(401);
         expect(reuse.body.message).toBe('Invalid refresh token');
 
-        await c.refreshWith(secondToken).expect(401);
-        expect(
-          await t.prisma.refreshToken.count({ where: { revokedAt: null } }),
-        ).toBe(0);
+        await c.refreshWith(c.refreshTokenOf(third)!).expect(401);
+        expect(await t.prisma.refreshToken.count({ where: { familyId } })).toBe(
+          0,
+        );
+        await other.refreshWith(other.refreshTokenOf(otherLogin)!).expect(200);
       });
 
       it('401 quando o token não vem no canal do cliente', async () => {
@@ -529,6 +560,7 @@ describe('Rotas independentes do client type (e2e)', () => {
         data: {
           tokenHash: TokenService.hashToken(token),
           userId,
+          familyId: randomUUID(),
           expiresAt: new Date(Date.now() + 86_400_000),
         },
       });

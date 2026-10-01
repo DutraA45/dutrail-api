@@ -172,9 +172,10 @@ export class AuthService {
    * tokens e códigos de troca pendentes). Numa transação só, para que a conta
    * nunca fique vinculada com a credencial antiga ainda valendo.
    *
-   * Os refresh tokens são apagados, não marcados com `revokedAt`: um token
-   * revogado reapresentado aciona a detecção de reuso, e o antigo dono o usaria
-   * para derrubar as sessões do dono real sempre que quisesse.
+   * Os refresh tokens são apagados, não marcados com `revokedAt`: apagado, um
+   * token reapresentado é só "não encontrado" (401 simples), sem passar pela
+   * janela de tolerância (que emitiria um par novo) nem pela detecção de
+   * reuso.
    */
   private takeOverUnverifiedAccount(
     userId: string,

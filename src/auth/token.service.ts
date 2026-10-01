@@ -4,7 +4,7 @@ import { JwtService, TokenExpiredError } from '@nestjs/jwt';
 import { createHash, randomUUID } from 'node:crypto';
 import { EnvironmentVariables } from '../config/env.validation.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import type { RefreshToken } from '../generated/prisma/client.js';
+import type { Prisma, RefreshToken } from '../generated/prisma/client.js';
 import type { SecurityContext } from '../security/security-context.js';
 import { SecurityLogService } from '../security/security-log.service.js';
 import type {
@@ -29,6 +29,26 @@ export interface TokenPair {
 type RefreshJwtCheck =
   { payload: RefreshTokenPayload } | { reason: 'invalid_jwt' | 'expired' };
 
+/** O que a rotação precisa da linha: o token e o usuário (para o par novo). */
+const WITH_USER = { user: { select: { id: true, email: true } } } as const;
+type StoredRefreshToken = RefreshToken & {
+  user: { id: string; email: string };
+};
+
+/** Linha a gravar para um refresh token recém-assinado. */
+function refreshTokenRow(
+  pair: TokenPair,
+  userId: string,
+  familyId: string,
+): Prisma.RefreshTokenUncheckedCreateInput {
+  return {
+    tokenHash: TokenService.hashToken(pair.refreshToken),
+    userId,
+    familyId,
+    expiresAt: pair.refreshTokenExpiresAt,
+  };
+}
+
 /**
  * Emissão, rotação e revogação de tokens.
  *
@@ -39,6 +59,11 @@ type RefreshJwtCheck =
  * cujo SHA-256 é persistido. Isso permite revogar (logout), rotacionar e
  * detectar reuso. Guardar só o hash significa que um dump do banco não dá
  * sessões válidas a ninguém.
+ *
+ * Família (A-04): todos os refresh tokens de uma sessão (um login num
+ * dispositivo) compartilham o `familyId`. O reuso derruba só a família, e um
+ * token recém-rotacionado tem uma janela de tolerância de uso único
+ * (REFRESH_GRACE_SECONDS) para respostas perdidas e abas concorrentes.
  *
  * Os dois levam `iss` (JWT_ISSUER) e um `aud` próprio do tipo, conferidos na
  * verificação junto com o algoritmo (A-14).
@@ -61,8 +86,217 @@ export class TokenService {
     return createHash('sha256').update(token).digest('hex');
   }
 
-  /** Gera access + refresh e persiste o hash do refresh. */
+  /**
+   * Gera access + refresh e persiste o hash do refresh numa família nova: é
+   * o começo de uma sessão (login, signup, troca do código do Google).
+   */
   async issueTokenPair(user: {
+    id: string;
+    email: string;
+  }): Promise<TokenPair> {
+    const signed = await this.signTokenPair(user);
+    await this.prisma.refreshToken.create({
+      data: refreshTokenRow(signed, user.id, randomUUID()),
+    });
+    return signed;
+  }
+
+  /**
+   * Rotação: valida o refresh token recebido, marca-o como rotacionado e
+   * devolve um par novo na mesma família. Toda recusa de um token recebido
+   * (JWT inválido ou expirado, não encontrado, reuso) responde o mesmo 401 com
+   * "Invalid refresh token", para não dar pistas a quem roubou o token; o
+   * motivo fica só no log de segurança. Token ausente é tratado antes, no
+   * controller, com "Missing refresh token".
+   */
+  async rotateRefreshToken(
+    refreshToken: string,
+    ctx: SecurityContext,
+  ): Promise<TokenPair> {
+    const stored = await this.findRefreshToken(refreshToken, ctx);
+    if (stored.revokedAt) {
+      return this.handleRotatedToken(stored, ctx);
+    }
+
+    // A-17: CAS, sucessor e ligação numa transação só. Se qualquer passo
+    // falhar, o token atual continua ativo e o cliente pode tentar de novo.
+    const signed = await this.signTokenPair(stored.user);
+    const rotated = await this.prisma.$transaction(async (tx) => {
+      // Compare-and-set: só quem conseguir marcar `revokedAt` (de null para
+      // agora) emite o sucessor.
+      const now = new Date();
+      const { count } = await tx.refreshToken.updateMany({
+        where: { id: stored.id, revokedAt: null },
+        data: { revokedAt: now, rotatedAt: now },
+      });
+      if (count === 0) return false;
+
+      const successor = await tx.refreshToken.create({
+        data: refreshTokenRow(signed, stored.userId, stored.familyId),
+      });
+      await tx.refreshToken.update({
+        where: { id: stored.id },
+        data: { successorId: successor.id },
+      });
+      return true;
+    });
+
+    if (!rotated) {
+      // Outra request com o mesmo token rotacionou antes (duas abas, retry
+      // concorrente). O UPDATE desta esperou o lock da linha até a outra
+      // transação terminar, então a linha recarregada já mostra o sucessor:
+      // é uma reapresentação como outra qualquer.
+      const current = await this.prisma.refreshToken.findUnique({
+        where: { id: stored.id },
+        include: WITH_USER,
+      });
+      if (!current) {
+        // Apagada nesse meio-tempo (logout, ou reuso detectado na família).
+        this.securityLog.warn('refresh_invalid', ctx, {
+          userId: stored.userId,
+          familyId: stored.familyId,
+          reason: 'not_found',
+        });
+        throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
+      }
+      return this.handleRotatedToken(current, ctx);
+    }
+
+    this.securityLog.log('refresh_success', ctx, {
+      userId: stored.userId,
+      familyId: stored.familyId,
+    });
+    return signed;
+  }
+
+  /**
+   * Logout: apaga o refresh token. Idempotente — se não existe (mas a
+   * assinatura é válida), não há nada a fazer.
+   *
+   * Apagar (em vez de marcar `revokedAt`) é proposital: um token deslogado
+   * que volte a aparecer vira um simples "não encontrado" (401), sem passar
+   * pela janela de tolerância nem pela detecção de reuso. O mesmo vale para o
+   * token anterior a ele na família: o sucessor sumiu, então também é 401
+   * simples (ver handleRotatedToken).
+   */
+  async revokeRefreshToken(
+    refreshToken: string,
+    ctx: SecurityContext,
+  ): Promise<void> {
+    const check = this.verifyRefreshJwt(refreshToken);
+    if ('reason' in check) {
+      this.securityLog.warn('logout', ctx, { reason: check.reason });
+      throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
+    }
+
+    const { count } = await this.prisma.refreshToken.deleteMany({
+      where: { tokenHash: TokenService.hashToken(refreshToken) },
+    });
+    this.securityLog.log('logout', ctx, {
+      userId: check.payload.sub,
+      reason: count === 0 ? 'not_found' : undefined,
+    });
+  }
+
+  /**
+   * Reapresentação de um token que já saiu de uso (`revokedAt` preenchido):
+   *
+   * a. Rotacionado há no máximo REFRESH_GRACE_SECONDS, com o sucessor ainda
+   *    ativo e a tolerância ainda não usada: emite um par irmão na mesma
+   *    família, sem mexer no sucessor (resposta perdida, duas abas).
+   * b. Sucessor apagado (logout, A-01): a sessão já acabou; 401 simples, sem
+   *    efeito colateral.
+   * c. Qualquer outro caso (fora da janela, tolerância já usada, sucessor já
+   *    rotacionado): reuso. Apaga a família inteira; as outras sessões do
+   *    usuário (outros dispositivos) continuam valendo.
+   *
+   * Linhas anteriores à migration de famílias têm `revokedAt` sem `rotatedAt`
+   * e nenhum sucessor conhecido: caem direto no reuso, e a família delas é só
+   * a própria linha.
+   */
+  private async handleRotatedToken(
+    stored: StoredRefreshToken,
+    ctx: SecurityContext,
+  ): Promise<TokenPair> {
+    const details = { userId: stored.userId, familyId: stored.familyId };
+
+    if (stored.rotatedAt) {
+      const successor =
+        stored.successorId === null
+          ? null
+          : await this.prisma.refreshToken.findUnique({
+              where: { id: stored.successorId },
+              select: { revokedAt: true },
+            });
+      if (!successor) {
+        this.securityLog.warn('refresh_invalid', ctx, {
+          ...details,
+          reason: 'not_found',
+        });
+        throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
+      }
+
+      // Sucessor já rotacionado: o dono recebeu e usou o token novo, então
+      // não houve resposta perdida. Quem reapresenta o antigo tem uma cópia.
+      if (
+        successor.revokedAt === null &&
+        this.withinGraceWindow(stored.rotatedAt)
+      ) {
+        const pair = await this.issueGracePair(stored);
+        if (pair) {
+          // warn: legítimo na maioria das vezes, mas também é o que um
+          // atacante com uma cópia recente do token conseguiria.
+          this.securityLog.warn('refresh_grace_used', ctx, details);
+          return pair;
+        }
+      }
+    }
+
+    // Registrado antes de apagar: se o DELETE falhar, o evento não se perde.
+    this.securityLog.warn('refresh_reuse_detected', ctx, details);
+    await this.prisma.refreshToken.deleteMany({
+      where: { familyId: stored.familyId },
+    });
+    throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
+  }
+
+  /** 0 desativa a janela. */
+  private withinGraceWindow(rotatedAt: Date): boolean {
+    const graceSeconds = this.config.get('REFRESH_GRACE_SECONDS', {
+      infer: true,
+    });
+    return (
+      graceSeconds > 0 &&
+      Date.now() - rotatedAt.getTime() <= graceSeconds * 1000
+    );
+  }
+
+  /**
+   * Uso único da janela: CAS em `graceUsedAt` e um token irmão do sucessor na
+   * mesma família, numa transação. `undefined` se a tolerância já foi usada
+   * (ou a linha sumiu) — quem chama trata como reuso.
+   */
+  private async issueGracePair(
+    stored: StoredRefreshToken,
+  ): Promise<TokenPair | undefined> {
+    const signed = await this.signTokenPair(stored.user);
+    const granted = await this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.refreshToken.updateMany({
+        where: { id: stored.id, graceUsedAt: null },
+        data: { graceUsedAt: new Date() },
+      });
+      if (count === 0) return false;
+
+      await tx.refreshToken.create({
+        data: refreshTokenRow(signed, stored.userId, stored.familyId),
+      });
+      return true;
+    });
+    return granted ? signed : undefined;
+  }
+
+  /** Assina access + refresh; quem chama decide onde persistir o refresh. */
+  private async signTokenPair(user: {
     id: string;
     email: string;
   }): Promise<TokenPair> {
@@ -92,96 +326,22 @@ export class TokenService {
 
     // Lê o `exp` calculado pelo jsonwebtoken em vez de parsear "7d" de novo.
     const { exp } = this.jwt.decode<{ exp: number }>(refreshToken);
-    const refreshTokenExpiresAt = new Date(exp * 1000);
-    await this.prisma.refreshToken.create({
-      data: {
-        tokenHash: TokenService.hashToken(refreshToken),
-        userId: user.id,
-        expiresAt: refreshTokenExpiresAt,
-      },
-    });
-
-    return { accessToken, refreshToken, refreshTokenExpiresAt };
-  }
-
-  /**
-   * Rotação: valida o refresh token recebido, revoga-o atomicamente e devolve
-   * um par novo. Toda recusa de um token recebido (JWT inválido ou expirado,
-   * não encontrado, reuso, rotação concorrente) responde o mesmo 401 com
-   * "Invalid refresh token", para não dar pistas a quem roubou o token; o
-   * motivo fica só no log de segurança. Token ausente é tratado antes, no
-   * controller, com "Missing refresh token".
-   */
-  async rotateRefreshToken(
-    refreshToken: string,
-    ctx: SecurityContext,
-  ): Promise<TokenPair> {
-    const stored = await this.findValidRefreshToken(refreshToken, ctx);
-
-    // Compare-and-set: só quem conseguir marcar `revokedAt` (de null para
-    // agora) segue em frente. Se dois requests concorrentes usarem o mesmo
-    // token, apenas um ganha; o outro cai no 401 abaixo.
-    const { count } = await this.prisma.refreshToken.updateMany({
-      where: { id: stored.id, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
-    if (count === 0) {
-      this.securityLog.warn('refresh_invalid', ctx, {
-        userId: stored.userId,
-        reason: 'concurrent_rotation',
-      });
-      throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
-    }
-
-    const pair = await this.issueTokenPair(stored.user);
-    this.securityLog.log('refresh_success', ctx, { userId: stored.userId });
-    return pair;
-  }
-
-  /**
-   * Logout: apaga o refresh token. Idempotente — se não existe (mas a
-   * assinatura é válida), não há nada a fazer.
-   *
-   * Apagar (em vez de marcar `revokedAt`) é proposital: um token deslogado
-   * que volte a aparecer vira um simples "não encontrado" (401), sem acionar
-   * a detecção de reuso — que derrubaria as outras sessões do usuário por
-   * causa de, digamos, um retry do cliente web.
-   */
-  async revokeRefreshToken(
-    refreshToken: string,
-    ctx: SecurityContext,
-  ): Promise<void> {
-    const check = this.verifyRefreshJwt(refreshToken);
-    if ('reason' in check) {
-      this.securityLog.warn('logout', ctx, { reason: check.reason });
-      throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
-    }
-
-    const { count } = await this.prisma.refreshToken.deleteMany({
-      where: { tokenHash: TokenService.hashToken(refreshToken) },
-    });
-    this.securityLog.log('logout', ctx, {
-      userId: check.payload.sub,
-      reason: count === 0 ? 'not_found' : undefined,
-    });
-  }
-
-  /** Derruba todas as sessões ativas do usuário (usado na detecção de reuso). */
-  async revokeAllForUser(userId: string): Promise<void> {
-    await this.prisma.refreshToken.updateMany({
-      where: { userId, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
+    return {
+      accessToken,
+      refreshToken,
+      refreshTokenExpiresAt: new Date(exp * 1000),
+    };
   }
 
   /**
    * Passo 1 (barato): assinatura + expiração do JWT.
-   * Passo 2: existe no banco, não expirou e não foi revogado.
+   * Passo 2: existe no banco e não expirou. Se foi rotacionado, quem decide é
+   * a rotação (janela de tolerância ou reuso).
    */
-  private async findValidRefreshToken(
+  private async findRefreshToken(
     refreshToken: string,
     ctx: SecurityContext,
-  ): Promise<RefreshToken & { user: { id: string; email: string } }> {
+  ): Promise<StoredRefreshToken> {
     const check = this.verifyRefreshJwt(refreshToken);
     if ('reason' in check) {
       this.securityLog.warn('refresh_invalid', ctx, { reason: check.reason });
@@ -190,7 +350,7 @@ export class TokenService {
 
     const stored = await this.prisma.refreshToken.findUnique({
       where: { tokenHash: TokenService.hashToken(refreshToken) },
-      include: { user: { select: { id: true, email: true } } },
+      include: WITH_USER,
     });
 
     if (!stored) {
@@ -203,22 +363,12 @@ export class TokenService {
       throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
     }
 
-    if (stored.revokedAt) {
-      // Um token já rotacionado/deslogado voltou a aparecer. Ou o cliente
-      // legítimo está reenviando um token antigo (bug), ou alguém roubou o
-      // token e o legítimo já o rotacionou. Nos dois casos, a única resposta
-      // segura é invalidar todas as sessões e forçar novo login.
-      // Registrado antes da revogação: se ela falhar, o evento não se perde.
-      this.securityLog.warn('refresh_reuse_detected', ctx, {
-        userId: stored.userId,
-      });
-      await this.revokeAllForUser(stored.userId);
-      throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
-    }
-
+    // Antes do estado de rotação: um token expirado nunca ganha a janela de
+    // tolerância. (O `exp` do JWT é o mesmo prazo; isto é a segunda barreira.)
     if (stored.expiresAt.getTime() <= Date.now()) {
       this.securityLog.warn('refresh_invalid', ctx, {
         userId: stored.userId,
+        familyId: stored.familyId,
         reason: 'expired',
       });
       throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);

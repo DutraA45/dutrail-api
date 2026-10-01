@@ -23,6 +23,8 @@ export interface TestClient {
   /** Renova apresentando um token específico — usado nos testes de reuso. */
   refreshWith(token: string): request.Test;
   logout(token?: string): request.Test;
+  /** Logout de um token específico, sem o cookie jar. */
+  logoutWith(token: string): request.Test;
   /** Extrai o refresh token da resposta, do canal próprio do cliente. */
   refreshTokenOf(res: Response): string | undefined;
   /** Garante que o token saiu SÓ pelo canal certo. */
@@ -117,6 +119,16 @@ export function createClient(
       type === 'web'
         ? withHeader(agent.post('/auth/logout'))
         : withHeader(agent.post('/auth/logout')).send({ refreshToken: token }),
+
+    logoutWith: (token) =>
+      type === 'web'
+        ? withHeader(request(server).post('/auth/logout')).set(
+            'Cookie',
+            `refreshToken=${encodeURIComponent(token)}`,
+          )
+        : withHeader(request(server).post('/auth/logout')).send({
+            refreshToken: token,
+          }),
 
     refreshTokenOf: (res) =>
       type === 'web'

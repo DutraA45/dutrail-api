@@ -84,13 +84,14 @@ servidor; não são garantia e podem mudar por ambiente sem aviso ao app.
 | ------- | ----------------- | ---------- |
 | Access  | `JWT_ACCESS_TTL`  | 15 minutos |
 | Refresh | `JWT_REFRESH_TTL` | 7 dias     |
+| Repetição do refresh já usado (tolerância) | `REFRESH_GRACE_SECONDS` | 30 segundos (máximo 60; 0 desativa) |
 
 A validade do refresh token é uma **janela deslizante**: cada chamada bem-sucedida
 a `/auth/refresh` emite um refresh token novo com a validade completa contada a
 partir daquele momento, e não herda o prazo do login original. Não há limite
 absoluto de duração da sessão: ela só expira se o app passar um período inteiro
-de `JWT_REFRESH_TTL` (7 dias no padrão) sem renovar, ou se for revogada (logout
-ou detecção de reuso).
+de `JWT_REFRESH_TTL` (7 dias no padrão) sem renovar, ou se for encerrada
+(logout, ou detecção de reuso na sessão deste dispositivo).
 
 Consequência para o app: **renovar ao receber 401 é suficiente.** Não é preciso
 ler o `exp` dos tokens, agendar renovação antes da expiração nem fixar esses
@@ -99,6 +100,28 @@ normal e é tratado pelo `Authenticator` (ver [Interceptor](#interceptor)). Um
 usuário que abre o app pelo menos uma vez dentro da janela do refresh token
 continua logado; depois disso, a renovação na inicialização retorna 401 e o app
 mostra o login.
+
+### Sessão por dispositivo e janela de tolerância
+
+Cada login (senha, signup ou Google) abre uma **sessão própria deste
+dispositivo**, e as renovações dela continuam na mesma sessão.
+
+Um refresh token que acabou de ser trocado em `/auth/refresh` ainda pode ser
+reapresentado **uma única vez**, por até `REFRESH_GRACE_SECONDS` (30 segundos
+no padrão) contados daquela troca, e recebe um par novo e válido da mesma
+sessão. É para o caso em que a resposta do refresh se perde (timeout, troca de
+Wi-Fi/4G, app morto em background): o servidor renovou, mas o app ficou com o
+token antigo. Ver [Erro de rede no refresh](#erro-de-rede-no-refresh).
+
+Fora disso, reapresentar um refresh token já usado é tratado como roubo
+(**reuso**): o servidor encerra **a sessão deste dispositivo** (todos os tokens
+dela) e responde 401 `Invalid refresh token`. As sessões do mesmo usuário em
+outros aparelhos e no web **não** são afetadas. Contam como reuso:
+
+- repetir depois da janela;
+- repetir pela segunda vez o mesmo token (a tolerância vale uma vez);
+- repetir um token depois que o token que o substituiu já foi usado num
+  refresh.
 
 ## Endpoints
 
@@ -186,15 +209,15 @@ Casos específicos do refresh token:
 | ------------------------------------------------------------------------------------------ | ------ | -------------------------------------------------- |
 | Cookie `refreshToken` presente na request mobile                                           | 400    | `must not be sent when X-Client-Type is mobile...` |
 | `/auth/refresh` sem `refreshToken` no corpo                                                | 401    | `Missing refresh token`                            |
-| `/auth/refresh` com token recusado: inválido, expirado, desconhecido, revogado ou já usado | 401    | `Invalid refresh token`                            |
+| `/auth/refresh` com token recusado: inválido, expirado, desconhecido, encerrado ou já usado fora da tolerância | 401    | `Invalid refresh token`                            |
 | `/auth/logout` com JWT inválido ou expirado (token desconhecido: 204)                      | 401    | `Invalid refresh token`                            |
 | `/auth/logout` sem `refreshToken` no corpo                                                 | 204    | — (idempotente)                                    |
 
 Senha errada e email inexistente retornam **o mesmo** 401 com
 `"Invalid credentials"`, de propósito (não revelar quais emails existem).
 Pelo mesmo motivo, todo refresh token enviado e recusado recebe o mesmo 401
-`"Invalid refresh token"`, inclusive quando o backend detecta reuso e derruba
-as outras sessões do usuário. O motivo fica só no log do servidor. O app não
+`"Invalid refresh token"`, inclusive quando o backend detecta reuso e encerra
+a sessão deste dispositivo. O motivo fica só no log do servidor. O app não
 tem como (nem precisa) distinguir os casos: trate como sessão encerrada.
 
 ## Login com Google
@@ -286,9 +309,12 @@ Quatro regras que o backend impõe, em ordem de gravidade:
 1. **`/auth/refresh` é de uso único e devolve token novo.** O app deve
    substituir o access **e** o refresh a cada renovação; guardar o refresh
    antigo quebra a próxima renovação.
-2. **Reapresentar um refresh token já rotacionado revoga todas as sessões do
-   usuário** (o backend interpreta como roubo). Garanta **um único refresh em
-   voo**, com as demais requests aguardando o resultado dele.
+2. **Reapresentar um refresh token já rotacionado encerra a sessão deste
+   dispositivo** (o backend interpreta como roubo), exceto uma única repetição
+   dentro da [janela de tolerância](#sessão-por-dispositivo-e-janela-de-tolerância).
+   As sessões em outros dispositivos continuam. Garanta **um único refresh em
+   voo**, com as demais requests aguardando o resultado dele: a tolerância é
+   para a resposta perdida, não para refreshes paralelos.
 3. **Não intercepte as rotas de auth.** Um 401 de `/auth/login` ou
    `/auth/refresh` não deve disparar refresh — isso gera laço infinito.
 4. **Todas as chamadas precisam do header `X-Client-Type: mobile`.** Sem ele, a
@@ -330,16 +356,43 @@ vez com o novo access token.
 
 Se o refresh falhar com 401 (ou 404, usuário apagado), a sessão acabou: o app
 limpa os tokens locais, retorna `null` e leva o usuário à tela de login com a
-mensagem de sessão expirada. Se falhar por erro de rede, o app **não** limpa a
-sessão — o refresh token pode continuar válido — e apenas desiste da request
-atual, deixando o erro chegar a quem chamou.
+mensagem de sessão expirada. Isso vale também para o 401 de uma repetição fora
+da janela de tolerância.
+
+#### Erro de rede no refresh
+
+Erro de rede é qualquer falha **sem** resposta HTTP do servidor (timeout,
+conexão recusada ou caída, troca de rede). Nesse caso o servidor pode ter
+renovado e a resposta se perdido, então:
+
+1. **Não limpe a sessão** e **mantenha o refresh token que foi enviado**. Não
+   há outro: o novo, se existiu, nunca chegou.
+2. **Repita `/auth/refresh` com o MESMO refresh token, uma vez, logo em
+   seguida** (sem backoff longo: a repetição precisa cair dentro da janela de
+   `REFRESH_GRACE_SECONDS`, 30 s no padrão), ainda dentro do lock. Se der
+   certo, siga o caminho de sucesso normal: persista o par devolvido e refaça a
+   request original.
+3. Se a repetição também falhar por rede, desista da request atual, mantenha os
+   tokens salvos e deixe o erro chegar a quem chamou. A próxima tentativa (por
+   exemplo, quando a rede voltar) usa o mesmo token salvo. Se o servidor
+   não tinha recebido nenhuma das chamadas, ela renova normalmente; se tinha
+   e a janela já passou, a resposta é 401 e a sessão local termina (passo
+   acima).
+4. Não repita mais de uma vez dentro da janela: a segunda repetição do mesmo
+   token já conta como reuso e encerra a sessão deste dispositivo.
+
+Uma resposta HTTP de erro do servidor (5xx, 429) não é erro de rede. A troca
+do token é transacional, então nesse caso o token enviado normalmente continua
+válido: mantenha-o e tente de novo mais tarde, sem limpar a sessão.
 
 ### Inicialização e logout
 
 Ao abrir o app com um refresh token salvo, chame `/auth/refresh` **antes** de
 exibir telas protegidas, persistindo o par de tokens devolvido. Se a resposta
-for 401, trate como "sessão expirada": limpe os tokens e mostre o login. Sem
-refresh token salvo, vá direto ao login.
+for 401, trate como "sessão expirada": limpe os tokens e mostre o login. Em
+erro de rede, aplique a mesma regra do
+[erro de rede no refresh](#erro-de-rede-no-refresh): mantenha o token e
+repita uma vez com ele. Sem refresh token salvo, vá direto ao login.
 
 No logout, chame `POST /auth/logout` com `{ "refreshToken": "..." }` no corpo e
 limpe todo o estado local. O access token continua tecnicamente válido até

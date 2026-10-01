@@ -106,6 +106,7 @@ Variáveis principais (todas validadas no boot — ver `src/config/env.validatio
 | `JWT_SECRET` / `JWT_REFRESH_SECRET`         | Segredos **diferentes**, ≥ 32 chars (≥ 43 em produção). Gere com o comando abaixo |
 | `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`        | Expirações (`15m`, `7d`): inteiro + `s`/`m`/`h`/`d`, teto de `1h` e `30d`         |
 | `JWT_ISSUER`                                | Opcional, padrão `dutrail-api`: claim `iss` dos tokens                            |
+| `REFRESH_GRACE_SECONDS`                     | Janela de tolerância do refresh rotacionado (padrão `30`, máximo `60`, `0` desativa) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                                                  |
 | `GOOGLE_CALLBACK_URL`                       | `http://localhost:3000/auth/google/callback` em dev                               |
 | `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200`       |
@@ -248,7 +249,10 @@ Formato de erro (todas as rotas, via `AllExceptionsFilter`):
    refresh token: web não o vê (está no cookie); mobile guarda em storage seguro.
 2. Chama a API com `Authorization: Bearer <accessToken>`.
 3. Ao receber 401, chama `POST /auth/refresh` (web: só o cookie, corpo vazio;
-   mobile: `{ refreshToken }`), **substitui os tokens** e repete a request.
+   mobile: `{ refreshToken }`), **substitui os tokens** e repete a request. Um
+   erro de rede no refresh pode ser repetido uma vez com o **mesmo** refresh
+   token, dentro de `REFRESH_GRACE_SECONDS`; um 401 do refresh encerra a sessão
+   local.
 4. `POST /auth/logout` ao sair — web também tem o cookie apagado pela resposta.
 
 Google: abra `GET /auth/google` numa janela do browser. Após o consentimento a
@@ -277,6 +281,11 @@ com o `code_verifier` certo (S256), como o Google, e o userinfo devolve um
 perfil configurável. `test/google-oauth.e2e-spec.ts` cobre o fluxo de ponta a
 ponta (login CSRF, injeção de `code`, cookie adulterado/expirado, cancelamento,
 erros do Google e varredura dos logs).
+`test/refresh-token-families.e2e-spec.ts` cobre famílias, janela de
+tolerância (resposta perdida, requests concorrentes, terceiro uso, fim da
+janela simulado recuando o `rotatedAt`) e o rollback da rotação, e
+`test/migrations.e2e-spec.ts` aplica as migrations num schema descartável e
+confere o backfill do `familyId` sobre linhas criadas antes dele.
 O storage dos `.fit` também é um fake em memória, o que permite simular falha
 do provedor. O fixture `test/fixtures/running.fit` é sintético, gerado pelo
 Encoder da Garmin, e não contém GPS. Para regenerá-lo, rode
@@ -314,18 +323,17 @@ o refresh.
 > pré-produção. O mesmo acontece sempre que `JWT_ISSUER` mudar.
 
 **Mesmo 401 para todo refresh token recusado.** JWT inválido ou expirado,
-token desconhecido, rotação concorrente e reuso respondem igual,
+token desconhecido e reuso respondem igual,
 `Invalid refresh token`, para quem roubou um token não saber, por exemplo, que
 o reuso foi detectado. O motivo vai só para o [log de segurança](#logs-de-segurança).
 Token ausente continua com `Missing refresh token`, porque não revela nada
 sobre um token.
 
-**Rotação + detecção de reuso.** Cada `/auth/refresh` revoga o token recebido
-(compare-and-set atômico, então dois requests concorrentes com o mesmo token
-não geram dois pares) e emite outro. Se um token **já rotacionado** for
-reapresentado, assumimos roubo e revogamos todas as sessões do usuário. O
-logout, por outro lado, apaga o token — reenviá-lo dá um 401 simples, sem
-derrubar as outras sessões (um retry do cliente não deve deslogar o celular).
+**Rotação + detecção de reuso por família.** Cada `/auth/refresh` troca o
+token recebido por outro da mesma sessão (família). Um token já rotacionado
+que volta a aparecer tem uma janela curta de tolerância; fora dela é reuso, e
+o servidor derruba só a sessão daquele dispositivo. Ver
+[Famílias de refresh token e janela de tolerância](#famílias-de-refresh-token-e-janela-de-tolerância).
 
 **Dois transportes para o refresh token, um por tipo de cliente.**
 
@@ -363,6 +371,65 @@ derrubar as outras sessões (um retry do cliente não deve deslogar o celular).
 **Callback do Google não coloca tokens na URL.** URLs vazam em histórico,
 logs de proxy e `Referer`. O callback gera um código de uso único (hash no
 banco, 60 s) e o frontend o troca por tokens em `POST /auth/google/exchange`.
+
+### Famílias de refresh token e janela de tolerância
+
+Cada login (senha, signup ou troca do código do Google) cria uma **família**,
+um `familyId` (uuid) que identifica a sessão de um dispositivo. A rotação
+herda a família. Cada linha de `RefreshToken` está num de três estados:
+
+| Estado          | Como fica no banco                                   | Reapresentado                                    |
+| --------------- | ---------------------------------------------------- | ------------------------------------------------ |
+| Ativo           | `revokedAt` nulo                                     | Rotaciona normalmente                            |
+| Rotacionado     | `revokedAt` e `rotatedAt` preenchidos, `successorId` | Janela de tolerância ou reuso (abaixo)           |
+| Inexistente     | Apagado por logout, pelo A-01 ou pelo reuso          | 401 simples, sem efeito colateral                |
+
+**Rotação transacional (A-17).** Numa única `$transaction`: o CAS
+(`updateMany where id e revokedAt nulo`, gravando `revokedAt` e `rotatedAt`),
+o `create` do sucessor na mesma família e o `successorId` no token antigo. Se
+qualquer passo falha, nada é gravado e o token continua ativo. Se o CAS não
+afeta linha nenhuma (outra request rotacionou o mesmo token antes), a request
+não falha direto: recarrega a linha e segue a regra de token rotacionado.
+
+**Token rotacionado reapresentado:**
+
+1. **Janela de tolerância.** Se a rotação foi há no máximo
+   `REFRESH_GRACE_SECONDS`, o sucessor ainda existe e **ainda não rotacionou**,
+   e a tolerância desse token não foi usada (CAS em `graceUsedAt`), o
+   servidor emite um par novo na mesma família, como **irmão** do sucessor, sem
+   apagá-lo. Uma resposta de refresh perdida na rede móvel, ou duas abas
+   renovando juntas, não derrubam ninguém. Evento `refresh_grace_used` (warn).
+   Vale **uma vez** por token rotacionado.
+2. **Sucessor apagado** (logout, A-01): a sessão já tinha acabado. 401
+   simples, nada é alterado.
+3. **Reuso** (fora da janela, tolerância já usada, ou sucessor que já
+   rotacionou, ou seja, o dono já recebeu e usou o token novo): o servidor
+   registra `refresh_reuse_detected` e **apaga todas as linhas da família**.
+   As outras famílias do usuário (outros dispositivos, o web) continuam
+   válidas. O cliente recebe o mesmo `Invalid refresh token`.
+
+**`REFRESH_GRACE_SECONDS`** (padrão `30`, máximo `60`, `0` desativa). Só
+inteiros; valor fora disso impede o boot. Uma janela maior tolera redes piores,
+mas também dá mais tempo a quem tiver uma cópia do token (ver riscos abaixo).
+
+**Logout apaga só a linha.** O token anterior da família continua rotacionado
+no banco, mas, com o sucessor apagado, reapresentá-lo cai no item 2.
+
+**Riscos aceitos:**
+
+- Quem tiver uma cópia de um token recém-rotacionado e usá-la dentro da janela
+  ganha um par independente na mesma família, sem que o dono perceba. Por isso
+  a janela é curta, de uso único e configurável, e `refresh_grace_used` deve
+  gerar alerta (ver [Logs de segurança](#logs-de-segurança)). O par do
+  atacante continua valendo enquanto ele o renovar: só cai se a família for
+  apagada (reuso detectado nela, ou o A-01). O logout do dono apaga só a linha
+  dele, não a família.
+- A tolerância vale uma vez por token: uma resposta perdida duas vezes
+  seguidas (ou três abas renovando ao mesmo tempo) cai em reuso e encerra a
+  sessão daquele dispositivo.
+- Linhas anteriores à migration `refresh_token_families` viraram uma família
+  cada (sem cadeia de rotação conhecida). Uma delas já revogada que volte a
+  aparecer conta como reuso e apaga só a si mesma.
 
 ### Login com Google: state, PKCE e erros
 
@@ -494,9 +561,10 @@ testes.
 | `signup`                  | log             | Cadastro concluído (com email mascarado)                                                | —                                                            |
 | `login_success`           | log             | Login por senha                                                                         | —                                                            |
 | `login_failed`            | warn            | Login recusado (com email mascarado). O cliente recebe sempre o mesmo 401               | `unknown_email`, `no_password` (conta só-Google), `wrong_password` |
-| `refresh_success`         | log             | Rotação do refresh token                                                                | —                                                            |
-| `refresh_invalid`         | warn            | Refresh recusado. O cliente recebe sempre `Invalid refresh token` (ou `Missing refresh token` sem token) | `missing_token`, `invalid_jwt`, `expired`, `not_found`, `concurrent_rotation` |
-| `refresh_reuse_detected`  | warn            | Token já rotacionado reapresentado: **todas as sessões do usuário foram revogadas**. O cliente recebe o mesmo `Invalid refresh token` | —                                                            |
+| `refresh_success`         | log             | Rotação do refresh token (com `familyId`)                                               | —                                                            |
+| `refresh_grace_used`      | warn            | Token rotacionado reapresentado dentro da janela de tolerância: par novo na mesma família (com `familyId`) | —                                                            |
+| `refresh_invalid`         | warn            | Refresh recusado. O cliente recebe sempre `Invalid refresh token` (ou `Missing refresh token` sem token) | `missing_token`, `invalid_jwt`, `expired`, `not_found` (inclui o token cujo sucessor foi apagado no logout) |
+| `refresh_reuse_detected`  | warn            | Reuso de token rotacionado: **a família (sessão daquele dispositivo) foi apagada**; as outras sessões do usuário continuam. Com `familyId`. O cliente recebe o mesmo `Invalid refresh token` | —                                                            |
 | `logout`                  | log / warn      | Logout (warn só quando o token tem assinatura inválida, caso em que a resposta é 401)   | `no_token`, `not_found`, `invalid_jwt`, `expired`            |
 | `google_link`             | log / warn      | Conta Google vinculada a uma conta local com o mesmo email                              | `verified_account` (log), `unverified_takeover` (warn: senha e sessões descartadas, A-01) |
 | `google_exchange_success` | log             | `POST /auth/google/exchange` entregou tokens                                            | —                                                            |
@@ -505,7 +573,9 @@ testes.
 
 **Campos.** `event`, `timestamp` (ISO 8601) e, quando houver, `userId`, `ip`
 (`req.ip`), `userAgent` (truncado em 200 caracteres), `clientType`,
-`emailMasked` e `reason`. O `reason` é sempre um código fixo, garantido pelo
+`emailMasked`, `reason` e `familyId` (eventos de refresh; um uuid opaco que
+liga os eventos de uma mesma sessão, sem valor de credencial). O `reason` é
+sempre um código fixo, garantido pelo
 tipo `SecurityReason`, e nunca texto livre nem mensagem de exceção. Campos
 ausentes não aparecem na linha.
 
@@ -534,8 +604,13 @@ são registradas pelo `GoogleCallbackFilter`, que também faz o redirect.
 **Alertas sugeridos:**
 
 - `refresh_reuse_detected`: **alertar em qualquer ocorrência**. É roubo de
-  token ou um bug de cliente, e nos dois casos o usuário foi deslogado de
-  todos os dispositivos.
+  token ou um bug de cliente, e nos dois casos o usuário foi deslogado naquele
+  dispositivo (a família foi apagada).
+- `refresh_grace_used`: **alertar**, com limiar. Na maioria das vezes é
+  legítimo (resposta perdida, duas abas), mas é também o que um atacante com
+  uma cópia recente do token consegue sem que o dono perceba. Suspeito: vários
+  por usuário em pouco tempo, ou `ip`/`userAgent` diferentes do
+  `refresh_success` da mesma `familyId` logo antes.
 - Picos de `login_failed`, por `ip` (força bruta) ou em muitos
   `emailMasked` distintos a partir de poucos IPs (credential stuffing).
 - Picos de `rate_limited` por `ip`.
@@ -545,6 +620,8 @@ são registradas pelo `GoogleCallbackFilter`, que também faz o redirect.
 ## Próximos passos sugeridos
 
 - Job para apagar `RefreshToken`/`OAuthExchangeCode` expirados (hoje só acumulam).
+- `POST /auth/logout-all` (A-08), **apagando** as linhas do usuário, como o
+  A-01: um token revogado sem apagar ainda passaria pela janela de tolerância.
 - Verificação de email e reset de senha (exigem envio de email).
 - `POST /auth/google/token` recebendo o `idToken` do Google Sign-In nativo, para
   o app Android não depender do fluxo de redirect.

@@ -160,7 +160,9 @@ export class AuthController {
     summary: 'Troca um refresh token por um novo par de tokens',
     description:
       'Lê o refresh token do cookie httpOnly (`web`) ou do corpo (`mobile`). O token enviado é ' +
-      'invalidado (rotação); reapresentar um token já usado revoga todas as sessões do usuário.',
+      'invalidado (rotação). Por REFRESH_GRACE_SECONDS (padrão 30 s) ele ainda pode ser repetido ' +
+      'uma vez (resposta perdida) e recebe um par novo da mesma sessão; fora disso, reapresentá-lo ' +
+      'é reuso e encerra a sessão daquele dispositivo (as outras continuam).',
   })
   @ApiRefreshResponse()
   @ApiBadRequestResponse({
