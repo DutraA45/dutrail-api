@@ -5,6 +5,7 @@ import type { Profile } from 'passport-google-oauth20';
 import { Strategy as BaseStrategy } from 'passport-strategy';
 import { AuthService } from '../../src/auth/auth.service.js';
 import { GoogleStrategy } from '../../src/auth/strategies/google.strategy.js';
+import { securityContextFrom } from '../../src/security/security-context.js';
 
 /**
  * Perfil que o "Google falso" vai devolver. Os testes trocam este valor antes
@@ -28,7 +29,9 @@ export function makeGoogleProfile(
   } as Profile;
 }
 
+// Com `passReqToCallback`, como a strategy real: o `req` vem primeiro.
 type VerifyCallback = (
+  req: Request,
   accessToken: string,
   refreshToken: string,
   profile: Profile,
@@ -60,6 +63,7 @@ class FakeGoogleBaseStrategy extends BaseStrategy {
       return;
     }
     this.verify(
+      req,
       'google-access-token',
       'google-refresh-token',
       fakeGoogle.profile,
@@ -87,9 +91,15 @@ export class FakeGoogleStrategy extends PassportStrategy(
     super({});
   }
 
-  validate(_accessToken: string, _refreshToken: string, profile: Profile) {
+  validate(
+    req: Request,
+    _accessToken: string,
+    _refreshToken: string,
+    profile: Profile,
+  ) {
     return this.authService.loginWithGoogle(
       GoogleStrategy.toGoogleProfile(profile),
+      securityContextFrom(req),
     );
   }
 }

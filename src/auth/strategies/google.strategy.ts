@@ -1,9 +1,11 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
+import type { Request } from 'express';
 import { Profile, Strategy } from 'passport-google-oauth20';
 import { EnvironmentVariables } from '../../config/env.validation.js';
 import type { User } from '../../generated/prisma/client.js';
+import { securityContextFrom } from '../../security/security-context.js';
 import { AuthService } from '../auth.service.js';
 import type { GoogleProfile } from '../interfaces/google-profile.interface.js';
 
@@ -27,20 +29,24 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
       clientSecret: config.get('GOOGLE_CLIENT_SECRET', { infer: true }),
       callbackURL: config.get('GOOGLE_CALLBACK_URL', { infer: true }),
       scope: ['email', 'profile'],
+      // O `req` chega ao validate() para o log de segurança (ip, user-agent).
+      passReqToCallback: true,
     });
   }
 
   /**
-   * Os tokens do Google (1º e 2º args) são ignorados: só precisamos da
+   * Os tokens do Google (2º e 3º args) são ignorados: só precisamos da
    * identidade, não de chamar APIs do Google em nome do usuário.
    */
   validate(
+    req: Request,
     _googleAccessToken: string,
     _googleRefreshToken: string,
     profile: Profile,
   ): Promise<User> {
     return this.authService.loginWithGoogle(
       GoogleStrategy.toGoogleProfile(profile),
+      securityContextFrom(req),
     );
   }
 

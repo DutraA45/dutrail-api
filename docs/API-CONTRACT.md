@@ -205,17 +205,23 @@ Todo erro sai neste formato (filtro global):
 | 409    | `POST /auth/signup` com email já cadastrado; `POST /activities/import` com arquivo já importado                                                                             | Mostra "email já em uso" (signup) ou "já importada" (importação)      |
 | 429    | Rate limit: 10 req/min por IP em `/auth/login` e `/auth/signup`; 20 em `POST /activities/import`; 100 no resto                                                              | Mostra "muitas tentativas, aguarde"                                   |
 
-Casos específicos do transporte:
+Casos específicos do refresh token:
 
-| Situação                                                          | Código | `message`                                             |
-| ----------------------------------------------------------------- | ------ | ----------------------------------------------------- |
-| `web` com `refreshToken` no corpo                                 | 400    | `must not be sent in the request body...`             |
-| `mobile` com cookie `refreshToken` na request                     | 400    | `must not be sent when X-Client-Type is mobile...`    |
-| `/auth/refresh` sem token no canal certo (cookie ou corpo vazios) | 401    | `Missing refresh token`                               |
-| `/auth/logout` sem token no canal certo                           | 204    | — (idempotente; web ainda recebe a limpeza do cookie) |
+| Situação                                                                                   | Código | `message`                                             |
+| ------------------------------------------------------------------------------------------ | ------ | ----------------------------------------------------- |
+| `web` com `refreshToken` no corpo                                                          | 400    | `must not be sent in the request body...`             |
+| `mobile` com cookie `refreshToken` na request                                              | 400    | `must not be sent when X-Client-Type is mobile...`    |
+| `/auth/refresh` sem token no canal certo (cookie ou corpo vazios)                          | 401    | `Missing refresh token`                               |
+| `/auth/refresh` com token recusado: inválido, expirado, desconhecido, revogado ou já usado | 401    | `Invalid refresh token`                               |
+| `/auth/logout` com JWT inválido ou expirado (token desconhecido: 204)                      | 401    | `Invalid refresh token`                               |
+| `/auth/logout` sem token no canal certo                                                    | 204    | — (idempotente; web ainda recebe a limpeza do cookie) |
 
 Senha errada e email inexistente retornam **o mesmo** 401 com
 `"Invalid credentials"`, de propósito (não revelar quais emails existem).
+Pelo mesmo motivo, todo refresh token enviado e recusado recebe o mesmo 401
+`"Invalid refresh token"`, inclusive quando o backend detecta reuso e derruba
+as outras sessões do usuário. O motivo fica só no log do servidor. O cliente
+não tem como (nem precisa) distinguir os casos: trate como sessão encerrada.
 
 ## Login com Google
 

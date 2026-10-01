@@ -162,6 +162,131 @@ describe('validateEnv', () => {
     });
   });
 
+  describe('SECURITY_LOG_ENABLED', () => {
+    const { SECURITY_LOG_ENABLED: _omitted, ...withoutFlag } = exampleEnv;
+
+    it('é true por padrão (variável ausente)', () => {
+      expect(validateEnv(withoutFlag).SECURITY_LOG_ENABLED).toBe(true);
+    });
+
+    it('o .env.example liga e o .env.test desliga', () => {
+      expect(validateEnv(exampleEnv).SECURITY_LOG_ENABLED).toBe(true);
+      expect(validateEnv(testEnv).SECURITY_LOG_ENABLED).toBe(false);
+    });
+
+    it.each(['yes', '0', ''])('recusa "%s": só true ou false', (value) => {
+      expect(
+        validationMessage({ ...exampleEnv, SECURITY_LOG_ENABLED: value }),
+      ).toMatch(/SECURITY_LOG_ENABLED deve ser "true" ou "false"/);
+    });
+  });
+
+  describe('JWT_ACCESS_TTL e JWT_REFRESH_TTL', () => {
+    it('os arquivos versionados usam 15m e 7d, e o padrão é o mesmo', () => {
+      for (const file of [exampleEnv, testEnv]) {
+        expect(file).toMatchObject({
+          JWT_ACCESS_TTL: '15m',
+          JWT_REFRESH_TTL: '7d',
+        });
+      }
+      const {
+        JWT_ACCESS_TTL: _access,
+        JWT_REFRESH_TTL: _refresh,
+        ...withoutTtls
+      } = exampleEnv;
+      expect(validateEnv(withoutTtls)).toMatchObject({
+        JWT_ACCESS_TTL: '15m',
+        JWT_REFRESH_TTL: '7d',
+      });
+    });
+
+    it.each([
+      ['JWT_ACCESS_TTL', '30s'],
+      ['JWT_ACCESS_TTL', '59m'],
+      ['JWT_ACCESS_TTL', '1h'],
+      ['JWT_ACCESS_TTL', '3600s'],
+      ['JWT_REFRESH_TTL', '12h'],
+      ['JWT_REFRESH_TTL', '3d'],
+      ['JWT_REFRESH_TTL', '30d'],
+      ['JWT_REFRESH_TTL', '720h'],
+    ] as const)('%s aceita "%s"', (name, value) => {
+      expect(validateEnv({ ...exampleEnv, [name]: value })[name]).toBe(value);
+    });
+
+    it.each([
+      ['JWT_ACCESS_TTL', '15'],
+      ['JWT_REFRESH_TTL', '604800'],
+      ['JWT_ACCESS_TTL', '0m'],
+      ['JWT_ACCESS_TTL', '-5m'],
+      ['JWT_ACCESS_TTL', '1.5h'],
+      ['JWT_ACCESS_TTL', '15 m'],
+      ['JWT_ACCESS_TTL', '15min'],
+      ['JWT_REFRESH_TTL', '1w'],
+      ['JWT_REFRESH_TTL', '7D'],
+      ['JWT_REFRESH_TTL', ''],
+    ])('%s recusa "%s" (formato)', (name, value) => {
+      const message = validationMessage({ ...exampleEnv, [name]: value });
+
+      expect(message).toContain(
+        `${name} deve ser um inteiro positivo seguido de s, m, h ou d`,
+      );
+      expect(message).toContain('milissegundos');
+    });
+
+    it.each([
+      ['JWT_ACCESS_TTL', '61m', '1h'],
+      ['JWT_ACCESS_TTL', '2h', '1h'],
+      ['JWT_ACCESS_TTL', '3601s', '1h'],
+      ['JWT_ACCESS_TTL', '1d', '1h'],
+      ['JWT_REFRESH_TTL', '31d', '30d'],
+      ['JWT_REFRESH_TTL', '721h', '30d'],
+      ['JWT_REFRESH_TTL', '99999999999999999999d', '30d'],
+    ])('%s recusa "%s" (acima de %s)', (name, value, max) => {
+      expect(validationMessage({ ...exampleEnv, [name]: value })).toContain(
+        `${name} não pode passar de ${max}`,
+      );
+    });
+
+    it('aponta as duas variáveis quando ambas falham, sem segredos na mensagem', () => {
+      const message = validationMessage({
+        ...exampleEnv,
+        JWT_ACCESS_TTL: '15',
+        JWT_REFRESH_TTL: '90d',
+      });
+
+      expect(message).toContain('JWT_ACCESS_TTL deve ser um inteiro positivo');
+      expect(message).toContain('JWT_REFRESH_TTL não pode passar de 30d');
+      expect(message).not.toContain(exampleEnv.JWT_SECRET);
+      expect(message).not.toContain(exampleEnv.JWT_REFRESH_SECRET);
+    });
+  });
+
+  describe('JWT_ISSUER', () => {
+    it('é dutrail-api por padrão (variável ausente)', () => {
+      expect(validateEnv(exampleEnv).JWT_ISSUER).toBe('dutrail-api');
+      expect(validateEnv(testEnv).JWT_ISSUER).toBe('dutrail-api');
+    });
+
+    it('aceita outro valor', () => {
+      expect(
+        validateEnv({ ...exampleEnv, JWT_ISSUER: 'https://api.dutrail.app' })
+          .JWT_ISSUER,
+      ).toBe('https://api.dutrail.app');
+    });
+
+    it.each(['', 'dutrail api', ' '])('recusa "%s"', (value) => {
+      expect(validationMessage({ ...exampleEnv, JWT_ISSUER: value })).toContain(
+        'JWT_ISSUER não pode ser vazio nem conter espaços',
+      );
+    });
+
+    it('recusa valor com mais de 255 caracteres', () => {
+      expect(
+        validationMessage({ ...exampleEnv, JWT_ISSUER: 'a'.repeat(256) }),
+      ).toContain('JWT_ISSUER pode ter no máximo 255 caracteres');
+    });
+  });
+
   describe('production', () => {
     it('aceita segredos aleatórios de 48 bytes em base64url', () => {
       const env = validateEnv(productionEnv());

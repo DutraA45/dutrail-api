@@ -101,11 +101,13 @@ Variáveis principais (todas validadas no boot — ver `src/config/env.validatio
 | `NODE_ENV`                                  | **Obrigatório**, sem default: `development`, `test` ou `production`               |
 | `DATABASE_URL`                              | Connection string do Postgres (Neon ou local)                                     |
 | `JWT_SECRET` / `JWT_REFRESH_SECRET`         | Segredos **diferentes**, ≥ 32 chars (≥ 43 em produção). Gere com o comando abaixo |
-| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`        | Expirações (`15m`, `7d`)                                                          |
+| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`        | Expirações (`15m`, `7d`): inteiro + `s`/`m`/`h`/`d`, teto de `1h` e `30d`         |
+| `JWT_ISSUER`                                | Opcional, padrão `dutrail-api`: claim `iss` dos tokens                            |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                                                  |
 | `GOOGLE_CALLBACK_URL`                       | `http://localhost:3000/auth/google/callback` em dev                               |
 | `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200`       |
 | `COOKIE_SECURE`                             | Flag `Secure` do cookie do refresh (padrão `true`); `false` recusado em produção  |
+| `SECURITY_LOG_ENABLED`                      | Log de eventos de segurança (padrão `true`; `false` no `.env.test`)               |
 | `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                        |
 | `OCI_S3_ENDPOINT`                           | Endpoint S3-compatível do Object Storage (seção abaixo)                           |
 | `OCI_S3_REGION`                             | Região do bucket, ex. `sa-saopaulo-1`                                             |
@@ -278,6 +280,28 @@ banco. O refresh token é outro JWT (`JWT_REFRESH_SECRET`, com `jti`) cujo
 **SHA-256** fica na tabela `RefreshToken`. Guardar só o hash significa que um
 vazamento do banco não entrega sessões válidas.
 
+**Claims e algoritmo conferidos nos dois tokens.** Ambos são HS256 e levam
+`iss` (`JWT_ISSUER`, padrão `dutrail-api`) e um `aud` próprio do tipo:
+`dutrail-access` ou `dutrail-refresh`. O guard do Bearer e o `/auth/refresh`
+recusam token com outro algoritmo, outro emissor ou a audiência do outro tipo.
+Assim um não passa pelo outro mesmo que algum dia compartilhem segredo. Os
+TTLs são validados no boot: só inteiro + unidade (`"15"` sem unidade seria
+lido como 15 ms pelo jsonwebtoken), com teto de 1h para o access e 30d para
+o refresh.
+
+> **Tokens anteriores a essa mudança (A-14) não valem mais.** Os emitidos
+> antes não têm `iss` nem `aud`, então access tokens recebem 401 no Bearer e
+> refresh tokens recebem 401 `Invalid refresh token` no `/auth/refresh`: todo
+> usuário precisa fazer login de novo uma vez. Aceito por estarmos em
+> pré-produção. O mesmo acontece sempre que `JWT_ISSUER` mudar.
+
+**Mesmo 401 para todo refresh token recusado.** JWT inválido ou expirado,
+token desconhecido, rotação concorrente e reuso respondem igual,
+`Invalid refresh token`, para quem roubou um token não saber, por exemplo, que
+o reuso foi detectado. O motivo vai só para o [log de segurança](#logs-de-segurança).
+Token ausente continua com `Missing refresh token`, porque não revela nada
+sobre um token.
+
 **Rotação + detecção de reuso.** Cada `/auth/refresh` revoga o token recebido
 (compare-and-set atômico, então dois requests concorrentes com o mesmo token
 não geram dois pares) e emite outro. Se um token **já rotacionado** for
@@ -390,6 +414,71 @@ loop. Banco e bucket não compartilham transação. A consistência vem da ordem
 das etapas: parse e checagem de duplicidade → upload → INSERT. Se o INSERT
 falhar, o objeto enviado é apagado; se até essa remoção falhar, a chave vai
 para o log. Falhas do storage viram 500 genérico, e o detalhe fica só no log.
+
+## Logs de segurança
+
+Eventos de autenticação e abuso saem como **uma linha JSON por evento**, pelo
+Logger do Nest com o contexto `SecurityLog` (`src/security/security-log.service.ts`).
+Falhas e suspeitas usam o nível `warn`, e sucessos usam `log`.
+`SECURITY_LOG_ENABLED=false` silencia esse log, o que só faz sentido nos
+testes.
+
+```
+[Nest] 1234  - 01/10/2026, 14:00:00   WARN [SecurityLog] {"event":"login_failed","timestamp":"2026-10-01T17:00:00.000Z","userId":"…","ip":"203.0.113.7","userAgent":"Mozilla/5.0 …","clientType":"web","emailMasked":"a***@e***.com","reason":"wrong_password"}
+```
+
+| Evento                    | Nível           | Quando                                                                                  | `reason`                                                     |
+| ------------------------- | --------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `signup`                  | log             | Cadastro concluído (com email mascarado)                                                | —                                                            |
+| `login_success`           | log             | Login por senha                                                                         | —                                                            |
+| `login_failed`            | warn            | Login recusado (com email mascarado). O cliente recebe sempre o mesmo 401               | `unknown_email`, `no_password` (conta só-Google), `wrong_password` |
+| `refresh_success`         | log             | Rotação do refresh token                                                                | —                                                            |
+| `refresh_invalid`         | warn            | Refresh recusado. O cliente recebe sempre `Invalid refresh token` (ou `Missing refresh token` sem token) | `missing_token`, `invalid_jwt`, `expired`, `not_found`, `concurrent_rotation` |
+| `refresh_reuse_detected`  | warn            | Token já rotacionado reapresentado: **todas as sessões do usuário foram revogadas**. O cliente recebe o mesmo `Invalid refresh token` | —                                                            |
+| `logout`                  | log / warn      | Logout (warn só quando o token tem assinatura inválida, caso em que a resposta é 401)   | `no_token`, `not_found`, `invalid_jwt`, `expired`            |
+| `google_link`             | log / warn      | Conta Google vinculada a uma conta local com o mesmo email                              | `verified_account` (log), `unverified_takeover` (warn: senha e sessões descartadas, A-01) |
+| `google_exchange_success` | log             | `POST /auth/google/exchange` entregou tokens                                            | —                                                            |
+| `google_exchange_failed`  | warn            | Código de troca recusado, ou falha (401/5xx) em `GET /auth/google/callback`              | `not_found`, `used`, `expired`, `concurrent_use`, `callback_error` |
+| `rate_limited`            | warn            | 429 do throttler, em qualquer rota                                                      | —                                                            |
+
+**Campos.** `event`, `timestamp` (ISO 8601) e, quando houver, `userId`, `ip`
+(`req.ip`), `userAgent` (truncado em 200 caracteres), `clientType`,
+`emailMasked` e `reason`. O `reason` é sempre um código fixo, garantido pelo
+tipo `SecurityReason`, e nunca texto livre nem mensagem de exceção. Campos
+ausentes não aparecem na linha.
+
+> **IP atrás de proxy.** Enquanto o `trust proxy` não for configurado (A-03),
+> `ip` é o endereço de quem abriu a conexão TCP. Atrás de um proxy ou load
+> balancer, esse é o IP do proxy, e não o do cliente.
+
+**Nunca vão para o log:** senha, tokens (access, refresh, código de troca do
+Google, `code`/`state` do callback), hashes (de senha, de token, de email),
+query string de URL e email em claro. Quando é preciso identificar o email
+(`signup`, `login_failed`), ele sai mascarado (`ana@example.com` →
+`a***@e***.com`), e não em hash: o hash de um email é revertido por
+dicionário. O serviço recebe o email cru e faz a máscara ele mesmo, para que
+nenhum chamador esqueça. Como a linha é JSON, uma quebra de linha no
+user-agent não consegue forjar uma linha falsa. O
+`test/security-log.e2e-spec.ts` executa um fluxo completo e varre **todas**
+as linhas de log em busca desses valores.
+
+**Como os dados chegam ao log.** O controller monta um `SecurityContext`
+(`ip`, `userAgent`, `clientType`) a partir do `req` e o passa como parâmetro
+ao `AuthService` e ao `TokenService`. Não há provider request-scoped nem
+AsyncLocalStorage. O 429 e as falhas do callback do Google acontecem em
+guards, antes de qualquer service, e por isso são registrados pelo
+`AllExceptionsFilter`.
+
+**Alertas sugeridos:**
+
+- `refresh_reuse_detected`: **alertar em qualquer ocorrência**. É roubo de
+  token ou um bug de cliente, e nos dois casos o usuário foi deslogado de
+  todos os dispositivos.
+- Picos de `login_failed`, por `ip` (força bruta) ou em muitos
+  `emailMasked` distintos a partir de poucos IPs (credential stuffing).
+- Picos de `rate_limited` por `ip`.
+- `google_link` com `unverified_takeover`: raro e legítimo, mas vale revisar
+  (é o desfecho de uma tentativa de pre-hijacking).
 
 ## Próximos passos sugeridos
 

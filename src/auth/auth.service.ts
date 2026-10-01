@@ -5,6 +5,8 @@ import {
 } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
+import type { SecurityContext } from '../security/security-context.js';
+import { SecurityLogService } from '../security/security-log.service.js';
 import { UsersService } from '../users/users.service.js';
 import type { User } from '../generated/prisma/client.js';
 import type { GoogleProfile } from './interfaces/google-profile.interface.js';
@@ -36,12 +38,14 @@ export class AuthService {
     private readonly passwordService: PasswordService,
     private readonly tokenService: TokenService,
     private readonly prisma: PrismaService,
+    private readonly securityLog: SecurityLogService,
   ) {}
 
   async signup(
     email: string,
     password: string,
-    name?: string,
+    name: string | undefined,
+    ctx: SecurityContext,
   ): Promise<AuthResult> {
     const existing = await this.usersService.findByEmail(email);
     if (existing) {
@@ -54,10 +58,15 @@ export class AuthService {
     const passwordHash = await this.passwordService.hash(password);
     const user = await this.usersService.create({ email, passwordHash, name });
     const tokens = await this.tokenService.issueTokenPair(user);
+    this.securityLog.log('signup', ctx, { userId: user.id, email });
     return { ...tokens, user };
   }
 
-  async login(email: string, password: string): Promise<AuthResult> {
+  async login(
+    email: string,
+    password: string,
+    ctx: SecurityContext,
+  ): Promise<AuthResult> {
     const user = await this.usersService.findByEmail(email);
 
     // Conta inexistente OU conta só-Google (sem senha): mesma resposta.
@@ -65,19 +74,30 @@ export class AuthService {
     const passwordOk = await this.passwordService.verify(hashToCheck, password);
 
     if (!user || !user.passwordHash || !passwordOk) {
+      // O motivo distingue os casos só no log; o cliente recebe o mesmo 401.
+      this.securityLog.warn('login_failed', ctx, {
+        userId: user?.id,
+        email,
+        reason: !user
+          ? 'unknown_email'
+          : !user.passwordHash
+            ? 'no_password'
+            : 'wrong_password',
+      });
       throw new UnauthorizedException('Invalid credentials');
     }
 
     const tokens = await this.tokenService.issueTokenPair(user);
+    this.securityLog.log('login_success', ctx, { userId: user.id });
     return { ...tokens, user };
   }
 
-  refresh(refreshToken: string): Promise<TokenPair> {
-    return this.tokenService.rotateRefreshToken(refreshToken);
+  refresh(refreshToken: string, ctx: SecurityContext): Promise<TokenPair> {
+    return this.tokenService.rotateRefreshToken(refreshToken, ctx);
   }
 
-  logout(refreshToken: string): Promise<void> {
-    return this.tokenService.revokeRefreshToken(refreshToken);
+  logout(refreshToken: string, ctx: SecurityContext): Promise<void> {
+    return this.tokenService.revokeRefreshToken(refreshToken, ctx);
   }
 
   /**
@@ -88,7 +108,10 @@ export class AuthService {
    *    (se o email dele não era verificado, descarta senha e sessões).
    * 3. Não existe                           -> cria usuário sem senha.
    */
-  async loginWithGoogle(profile: GoogleProfile): Promise<User> {
+  async loginWithGoogle(
+    profile: GoogleProfile,
+    ctx: SecurityContext,
+  ): Promise<User> {
     const byGoogleId = await this.usersService.findByGoogleId(profile.googleId);
     if (byGoogleId) {
       return byGoogleId;
@@ -109,9 +132,24 @@ export class AuthService {
         avatarUrl: byEmail.avatarUrl ?? profile.avatarUrl,
       };
       if (byEmail.emailVerified) {
-        return this.usersService.linkGoogleAccount(byEmail.id, data);
+        const linked = await this.usersService.linkGoogleAccount(
+          byEmail.id,
+          data,
+        );
+        this.securityLog.log('google_link', ctx, {
+          userId: byEmail.id,
+          reason: 'verified_account',
+        });
+        return linked;
       }
-      return this.takeOverUnverifiedAccount(byEmail.id, data);
+      // warn: legítimo para o dono do email, mas também é o desfecho de uma
+      // tentativa de pre-hijacking (senha e sessões anteriores descartadas).
+      const linked = await this.takeOverUnverifiedAccount(byEmail.id, data);
+      this.securityLog.warn('google_link', ctx, {
+        userId: byEmail.id,
+        reason: 'unverified_takeover',
+      });
+      return linked;
     }
 
     return this.usersService.create({
@@ -169,14 +207,25 @@ export class AuthService {
   }
 
   /** Troca o código de uso único por um par de tokens (POST /auth/google/exchange). */
-  async exchangeCode(code: string): Promise<AuthResult> {
+  async exchangeCode(code: string, ctx: SecurityContext): Promise<AuthResult> {
     const codeHash = AuthService.hashCode(code);
     const stored = await this.prisma.oAuthExchangeCode.findUnique({
       where: { codeHash },
       include: { user: true },
     });
 
-    if (!stored || stored.usedAt || stored.expiresAt.getTime() <= Date.now()) {
+    const invalidReason = !stored
+      ? 'not_found'
+      : stored.usedAt
+        ? 'used'
+        : stored.expiresAt.getTime() <= Date.now()
+          ? 'expired'
+          : undefined;
+    if (!stored || invalidReason) {
+      this.securityLog.warn('google_exchange_failed', ctx, {
+        userId: stored?.user.id,
+        reason: invalidReason,
+      });
       throw new UnauthorizedException('Invalid or expired code');
     }
 
@@ -187,10 +236,17 @@ export class AuthService {
       data: { usedAt: new Date() },
     });
     if (count === 0) {
+      this.securityLog.warn('google_exchange_failed', ctx, {
+        userId: stored.user.id,
+        reason: 'concurrent_use',
+      });
       throw new UnauthorizedException('Invalid or expired code');
     }
 
     const tokens = await this.tokenService.issueTokenPair(stored.user);
+    this.securityLog.log('google_exchange_success', ctx, {
+      userId: stored.user.id,
+    });
     return { ...tokens, user: stored.user };
   }
 
