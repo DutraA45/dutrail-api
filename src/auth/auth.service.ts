@@ -9,6 +9,7 @@ import type { SecurityContext } from '../security/security-context.js';
 import { SecurityLogService } from '../security/security-log.service.js';
 import { UsersService } from '../users/users.service.js';
 import type { User } from '../generated/prisma/client.js';
+import { GoogleEmailNotVerifiedException } from './google-callback.js';
 import type { GoogleProfile } from './interfaces/google-profile.interface.js';
 import { PasswordService } from './password.service.js';
 import { TokenService, type TokenPair } from './token.service.js';
@@ -121,7 +122,7 @@ export class AuthService {
     // Caso contrário alguém poderia criar uma conta Google com o email de
     // outra pessoa e sequestrar a conta local dela.
     if (!profile.emailVerified) {
-      throw new UnauthorizedException('Google account email is not verified');
+      throw new GoogleEmailNotVerifiedException();
     }
 
     const byEmail = await this.usersService.findByEmail(profile.email);

@@ -226,6 +226,55 @@ function checkProductionCredentials(env: EnvironmentVariables): string[] {
   return problems;
 }
 
+/** Credenciais do Google conferidas pelo aviso de desenvolvimento. */
+const GOOGLE_CREDENTIALS = [
+  'GOOGLE_CLIENT_ID',
+  'GOOGLE_CLIENT_SECRET',
+] as const;
+
+/**
+ * Avisos (não erros) sobre a configuração do Google fora de produção: um
+ * placeholder do `.env.example` ou um GOOGLE_CALLBACK_URL que não aponta para a
+ * rota do callback (`callbackPath`) fazem o login com Google falhar só no
+ * Google, longe da causa. Em produção não há aviso: os placeholders já são
+ * recusados no boot (checkProductionCredentials). Nunca inclui os valores.
+ */
+export function googleConfigWarnings(
+  env: Pick<
+    EnvironmentVariables,
+    'NODE_ENV' | 'GOOGLE_CALLBACK_URL' | (typeof GOOGLE_CREDENTIALS)[number]
+  >,
+  callbackPath: string,
+): string[] {
+  if (env.NODE_ENV === NodeEnv.Production) return [];
+  const warnings: string[] = [];
+
+  for (const name of GOOGLE_CREDENTIALS) {
+    const value = env[name].toLowerCase();
+    const fragment = PLACEHOLDER_FRAGMENTS.find((f) => value.includes(f));
+    if (fragment) {
+      warnings.push(
+        `${name} contém o trecho de placeholder "${fragment}" (valor do .env.example?); o login com Google vai falhar no Google`,
+      );
+    }
+  }
+
+  // O @IsUrl já garantiu uma URL; o try cobre o que ele aceita e o URL não.
+  let path: string | undefined;
+  try {
+    path = new URL(env.GOOGLE_CALLBACK_URL).pathname;
+  } catch {
+    path = undefined;
+  }
+  if (path !== callbackPath) {
+    warnings.push(
+      `o caminho de GOOGLE_CALLBACK_URL não é ${callbackPath} (a rota do callback); o Google redirecionaria para uma rota que não existe`,
+    );
+  }
+
+  return warnings;
+}
+
 /**
  * A conversão implícita faria `Boolean("false") === true`; aqui só "true" e
  * "false" viram booleano. Qualquer outro valor passa adiante e o @IsBoolean

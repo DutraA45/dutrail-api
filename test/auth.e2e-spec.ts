@@ -2,7 +2,12 @@ import { Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { TokenService } from '../src/auth/token.service.js';
-import { fakeGoogle, makeGoogleProfile } from './fakes/fake-google.strategy.js';
+import {
+  exchangeCodeOf,
+  fakeGoogle,
+  googleCallback,
+  makeGoogleProfile,
+} from './fakes/fake-google.strategy.js';
 import {
   CLIENT_TYPES,
   createClient,
@@ -39,7 +44,7 @@ describe.each(CLIENT_TYPES)(
 
     beforeEach(async () => {
       await t.resetDb();
-      fakeGoogle.profile = null;
+      fakeGoogle.reset();
       // Cliente novo a cada teste: cookie jar limpo, como um browser recém-aberto.
       c = createClient(t.app, clientType);
     });
@@ -180,15 +185,16 @@ describe.each(CLIENT_TYPES)(
     describe('Google OAuth (strategy mockada)', () => {
       it('troca o código por tokens no canal do cliente', async () => {
         fakeGoogle.profile = makeGoogleProfile({});
-        const callback = await c
-          .get('/auth/google/callback?code=google-code')
-          .expect(302);
-        const code = new URL(callback.headers.location).searchParams.get(
-          'code',
-        )!;
-        // O redirect do Google nunca carrega token, em nenhum dos fluxos.
+        const callback = await googleCallback(t.app.getHttpServer());
+        expect(callback.status).toBe(302);
+        const code = exchangeCodeOf(callback.headers.location);
+        // O redirect do Google nunca carrega token, em nenhum dos fluxos: o
+        // único cookie é o de state sendo apagado (A-02).
         expect(callback.headers.location).not.toMatch(/token/i);
-        expect(callback.headers['set-cookie']).toBeUndefined();
+        expect(setCookie(callback)).toBeUndefined();
+        expect(callback.headers['set-cookie']).toEqual([
+          expect.stringMatching(/^googleOAuthState=;/),
+        ]);
 
         const res = await c
           .post('/auth/google/exchange')
@@ -427,7 +433,7 @@ describe('Rotas independentes do client type (e2e)', () => {
 
   beforeEach(async () => {
     await t.resetDb();
-    fakeGoogle.profile = null;
+    fakeGoogle.reset();
   });
 
   afterAll(async () => {
@@ -601,10 +607,9 @@ describe('Rotas independentes do client type (e2e)', () => {
     profile: Parameters<typeof makeGoogleProfile>[0],
   ) {
     fakeGoogle.profile = makeGoogleProfile(profile);
-    const callback = await http()
-      .get('/auth/google/callback?code=google-code')
-      .expect(302);
-    const code = new URL(callback.headers.location).searchParams.get('code')!;
+    const callback = await googleCallback(t.app.getHttpServer());
+    expect(callback.status).toBe(302);
+    const code = exchangeCodeOf(callback.headers.location);
     return c.post('/auth/google/exchange').send({ code }).expect(200);
   }
 
@@ -726,10 +731,12 @@ describe('Rotas independentes do client type (e2e)', () => {
       verified: false,
     });
 
-    const res = await http()
-      .get('/auth/google/callback?code=google-code')
-      .expect(401);
-    expect(res.body.message).toContain('not verified');
+    // A regra de negócio é a mesma; só o desfecho virou redirect (A-13).
+    const res = await googleCallback(t.app.getHttpServer());
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(
+      'http://localhost:4200/auth/callback?error=email_not_verified',
+    );
 
     const stored = await t.prisma.user.findUnique({
       where: { email: 'ana@example.com' },
@@ -740,10 +747,8 @@ describe('Rotas independentes do client type (e2e)', () => {
   it('rejeita código de troca já usado ou expirado', async () => {
     const c = mobile();
     fakeGoogle.profile = makeGoogleProfile({});
-    const callback = await http()
-      .get('/auth/google/callback?code=google-code')
-      .expect(302);
-    const code = new URL(callback.headers.location).searchParams.get('code')!;
+    const callback = await googleCallback(t.app.getHttpServer());
+    const code = exchangeCodeOf(callback.headers.location);
 
     await c.post('/auth/google/exchange').send({ code }).expect(200);
     await c.post('/auth/google/exchange').send({ code }).expect(401);
@@ -752,31 +757,33 @@ describe('Rotas independentes do client type (e2e)', () => {
       email: 'outro@example.com',
       id: 'g-2',
     });
-    const second = await http()
-      .get('/auth/google/callback?code=google-code')
-      .expect(302);
-    const expiring = new URL(second.headers.location).searchParams.get('code')!;
+    const second = await googleCallback(t.app.getHttpServer());
+    const expiring = exchangeCodeOf(second.headers.location);
     await t.prisma.oAuthExchangeCode.updateMany({
       data: { expiresAt: new Date(Date.now() - 1000) },
     });
     await c.post('/auth/google/exchange').send({ code: expiring }).expect(401);
   });
 
-  it('A-19: o log de um 5xx no callback do Google não leva a query string (code/state)', async () => {
-    // Sem perfil configurado, a strategy falsa falha com um Error comum: 500.
+  it('A-19/A-13: erro inesperado no callback redireciona (sem 500) e o log do stack não leva a query string', async () => {
+    // Sem perfil configurado, o userinfo falso falha com um Error comum (não
+    // é erro do OAuth): o stack é logado, mas só com o path.
     const logError = vi
       .spyOn(Logger.prototype, 'error')
       .mockImplementation(() => undefined);
     try {
-      await http()
-        .get('/auth/google/callback?code=abc123&state=st4te987')
-        .expect(500);
+      const res = await googleCallback(t.app.getHttpServer());
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe(
+        'http://localhost:4200/auth/callback?error=oauth_failed',
+      );
+      const [{ code }] = fakeGoogle.tokenRequests;
 
-      expect(logError).toHaveBeenCalled();
+      expect(logError).toHaveBeenCalledTimes(1);
       const logged = JSON.stringify(logError.mock.calls);
-      expect(logged).toContain('GET /auth/google/callback -> 500');
-      expect(logged).not.toContain('abc123');
-      expect(logged).not.toContain('st4te987');
+      expect(logged).toContain('GET /auth/google/callback -> oauth_failed');
+      expect(logged).not.toContain(code);
+      expect(logged).not.toContain('state=');
     } finally {
       logError.mockRestore();
     }
