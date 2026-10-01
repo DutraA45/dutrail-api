@@ -6,6 +6,7 @@ import { SecurityLogModule } from '../security/security-log.module.js';
 import { UsersModule } from '../users/users.module.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
+import { ExpiredTokensCleanupService } from './expired-tokens-cleanup.service.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import { OAuthStateStore } from './oauth-state.store.js';
 import { PasswordService } from './password.service.js';
@@ -37,6 +38,8 @@ import { TokenService } from './token.service.js';
     // passport (pelo mixin PassportStrategy) sob os nomes 'jwt' e 'google'.
     JwtStrategy,
     GoogleStrategy,
+    // Job diário que apaga refresh tokens e códigos de troca expirados (A-12).
+    ExpiredTokensCleanupService,
     // Guard global: toda rota exige Bearer válido, salvo as marcadas @Public().
     { provide: APP_GUARD, useClass: JwtAuthGuard },
   ],

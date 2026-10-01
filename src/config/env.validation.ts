@@ -100,6 +100,13 @@ export class EnvironmentVariables {
   @IsBoolean({ message: 'SECURITY_LOG_ENABLED deve ser "true" ou "false"' })
   SECURITY_LOG_ENABLED: boolean = true;
 
+  // Jobs agendados (A-12: limpeza diária de tokens expirados). Ligado por
+  // padrão; o .env.test o desliga para nenhum cron rodar durante os testes.
+  // Lido também no AppModule (schedulerEnabled), antes da validação.
+  @Transform(({ obj, key }) => parseBooleanFlag(obj[key]))
+  @IsBoolean({ message: 'SCHEDULER_ENABLED deve ser "true" ou "false"' })
+  SCHEDULER_ENABLED: boolean = true;
+
   @IsString()
   @IsNotEmpty()
   DATABASE_URL: string;
@@ -306,6 +313,16 @@ function parseBooleanFlag(raw: unknown): unknown {
   if (value === 'true' || value === true) return true;
   if (value === 'false' || value === false) return false;
   return raw;
+}
+
+/**
+ * Decide, a partir do process.env cru, se o ScheduleModule é registrado
+ * (AppModule, via ConditionalModule). Ausente vale true, como o default da
+ * classe; um valor inválido nunca chega aqui, porque o validateEnv já recusou
+ * o boot.
+ */
+export function schedulerEnabled(env: Record<string, unknown>): boolean {
+  return parseBooleanFlag(env.SCHEDULER_ENABLED ?? true) === true;
 }
 
 /**

@@ -12,6 +12,7 @@ export const SECURITY_EVENTS = [
   'refresh_grace_used',
   'refresh_reuse_detected',
   'logout',
+  'logout_all',
   'google_link',
   'google_exchange_success',
   'google_exchange_failed',
@@ -58,6 +59,8 @@ export interface SecurityEventDetails {
    * liga os eventos de uma mesma sessão. Não é credencial.
    */
   familyId?: string;
+  /** logout_all: quantas sessões (famílias de refresh token) foram apagadas. */
+  sessionsRemoved?: number;
 }
 
 /** Uma linha do log. Campos `undefined` somem no JSON. */
@@ -71,6 +74,7 @@ export interface SecurityLogEntry {
   emailMasked?: string;
   reason?: SecurityReason;
   familyId?: string;
+  sessionsRemoved?: number;
 }
 
 export const SECURITY_LOG_CONTEXT = 'SecurityLog';
@@ -100,7 +104,8 @@ export function maskEmail(email: string): string {
  *
  * Nunca recebe senha, token, código de troca, hash nem URL: a assinatura só
  * aceita o contexto da request, o userId, o email (mascarado aqui), um motivo
- * fixo e o familyId do refresh token. `warn` para falhas e suspeitas, `log` para sucessos.
+ * fixo, o familyId do refresh token e a contagem de sessões do logout_all.
+ * `warn` para falhas e suspeitas, `log` para sucessos.
  */
 @Injectable()
 export class SecurityLogService {
@@ -145,6 +150,7 @@ export class SecurityLogService {
         details.email === undefined ? undefined : maskEmail(details.email),
       reason: details.reason,
       familyId: details.familyId,
+      sessionsRemoved: details.sessionsRemoved,
     };
   }
 }

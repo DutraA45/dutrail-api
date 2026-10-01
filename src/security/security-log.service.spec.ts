@@ -106,6 +106,24 @@ describe('SecurityLogService', () => {
     }
   });
 
+  it('logout_all: log com userId e a contagem de sessões apagadas', () => {
+    createService().log('logout_all', ctx, {
+      userId: 'user-1',
+      sessionsRemoved: 3,
+    });
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(lastLine(logSpy)).toEqual({
+      event: 'logout_all',
+      timestamp: expect.any(String),
+      userId: 'user-1',
+      sessionsRemoved: 3,
+      ip: '203.0.113.7',
+      userAgent: 'Mozilla/5.0',
+      clientType: 'web',
+    });
+  });
+
   it('omite os campos ausentes (sem userId, client type ou reason)', () => {
     createService().warn('rate_limited', { ip: '10.0.0.1' });
 

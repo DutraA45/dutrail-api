@@ -11,6 +11,7 @@ import {
   PLACEHOLDER_FRAGMENTS,
   PRODUCTION_JWT_SECRET_MIN_LENGTH,
   REFRESH_GRACE_MAX_SECONDS,
+  schedulerEnabled,
   validateEnv,
 } from './env.validation.js';
 
@@ -183,6 +184,34 @@ describe('validateEnv', () => {
       expect(
         validationMessage({ ...exampleEnv, SECURITY_LOG_ENABLED: value }),
       ).toMatch(/SECURITY_LOG_ENABLED deve ser "true" ou "false"/);
+    });
+  });
+
+  describe('SCHEDULER_ENABLED', () => {
+    const { SCHEDULER_ENABLED: _omitted, ...withoutFlag } = exampleEnv;
+
+    it('é true por padrão (variável ausente)', () => {
+      expect(validateEnv(withoutFlag).SCHEDULER_ENABLED).toBe(true);
+    });
+
+    it('o .env.example liga e o .env.test desliga', () => {
+      expect(validateEnv(exampleEnv).SCHEDULER_ENABLED).toBe(true);
+      expect(validateEnv(testEnv).SCHEDULER_ENABLED).toBe(false);
+    });
+
+    it.each(['yes', '0', ''])('recusa "%s": só true ou false', (value) => {
+      expect(
+        validationMessage({ ...exampleEnv, SCHEDULER_ENABLED: value }),
+      ).toMatch(/SCHEDULER_ENABLED deve ser "true" ou "false"/);
+    });
+
+    it('schedulerEnabled (AppModule) lê o env cru como a validação', () => {
+      expect(schedulerEnabled({})).toBe(true);
+      expect(schedulerEnabled({ SCHEDULER_ENABLED: 'true' })).toBe(true);
+      expect(schedulerEnabled({ SCHEDULER_ENABLED: ' TRUE ' })).toBe(true);
+      expect(schedulerEnabled({ SCHEDULER_ENABLED: 'false' })).toBe(false);
+      expect(schedulerEnabled({ SCHEDULER_ENABLED: ' False' })).toBe(false);
+      expect(schedulerEnabled(testEnv)).toBe(false);
     });
   });
 

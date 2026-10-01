@@ -28,7 +28,7 @@ Base em desenvolvimento: `http://localhost:3000`.
 
 No app, o valor é sempre `mobile`. Nas rotas que emitem ou leem o refresh token
 (`/auth/signup`, `/auth/login`, `/auth/refresh`, `/auth/logout`,
-`/auth/google/exchange`):
+`/auth/logout-all`, `/auth/google/exchange`):
 
 | Header                             | Resposta                                               |
 | ---------------------------------- | ------------------------------------------------------ |
@@ -50,6 +50,7 @@ todas as requests é seguro.
 | Enviar o refresh token         | `{ "refreshToken": "eyJ..." }` no corpo                                                              |
 | Token no canal errado          | Cookie `refreshToken` presente na request → **400**                                                  |
 | Logout                         | Revoga no banco                                                                                      |
+| Logout de todos os dispositivos | Bearer; encerra todas as sessões do usuário (app e web)                                             |
 | Onde o cliente guarda          | Armazenamento seguro do Android (Android Keystore protegendo os tokens, ex. DataStore criptografado) |
 
 Como o app não deve mandar cookie `refreshToken`, o cliente HTTP não precisa de
@@ -91,7 +92,8 @@ a `/auth/refresh` emite um refresh token novo com a validade completa contada a
 partir daquele momento, e não herda o prazo do login original. Não há limite
 absoluto de duração da sessão: ela só expira se o app passar um período inteiro
 de `JWT_REFRESH_TTL` (7 dias no padrão) sem renovar, ou se for encerrada
-(logout, ou detecção de reuso na sessão deste dispositivo).
+(logout, logout de todos os dispositivos, ou detecção de reuso na sessão deste
+dispositivo).
 
 Consequência para o app: **renovar ao receber 401 é suficiente.** Não é preciso
 ler o `exp` dos tokens, agendar renovação antes da expiração nem fixar esses
@@ -131,6 +133,7 @@ outros aparelhos e no web **não** são afetadas. Contam como reuso:
 | POST   | `/auth/login`           | `mobile`        | `email`, `password`          | 200     | `accessToken`, `refreshToken`, `user`     |
 | POST   | `/auth/refresh`         | `mobile`        | `refreshToken`               | 200     | `accessToken`, `refreshToken`             |
 | POST   | `/auth/logout`          | `mobile`        | `refreshToken`               | 204     | corpo vazio                               |
+| POST   | `/auth/logout-all`      | `mobile`        | vazio (Bearer)               | 204     | corpo vazio                               |
 | GET    | `/auth/google`          | —               | —                            | 302     | redirect para o Google (ver aviso abaixo) |
 | POST   | `/auth/google/exchange` | `mobile`        | `code`                       | 200     | `accessToken`, `refreshToken`, `user`     |
 | GET    | `/me`                   | —               | — (Bearer)                   | 200     | apenas `user`                             |
@@ -179,6 +182,37 @@ HTTP/1.1 204 No Content
 
 `GET /me` devolve o objeto `user` na raiz, sem envelope.
 
+### Sair de todos os dispositivos
+
+`POST /auth/logout-all` encerra **todas** as sessões do usuário: as deste
+aparelho, as de outros celulares e as do web. É o "sair de todos os
+dispositivos" para um celular perdido ou roubado.
+
+- Autentica pelo **access token** (`Authorization: Bearer`), não pelo refresh
+  token. O corpo fica vazio.
+- Exige `X-Client-Type: mobile`, como as demais rotas de token.
+- Os **outros dispositivos** continuam com o access token que já tinham até
+  ele expirar; no próximo `/auth/refresh` recebem 401 `Invalid refresh token`
+  e vão para o login.
+- O **access token atual continua válido até expirar** (é stateless, até
+  `JWT_ACCESS_TTL`). Por isso o app deve descartar os dois tokens e limpar o
+  estado local logo após a resposta, como no logout.
+- Idempotente: sem sessões abertas, responde 204 do mesmo jeito.
+- Mesmo rate limit do login: 10 req/min por IP.
+
+```http
+POST /auth/logout-all
+Authorization: Bearer eyJ...
+X-Client-Type: mobile
+
+HTTP/1.1 204 No Content
+```
+
+| Situação                                      | Código | `message`                             |
+| --------------------------------------------- | ------ | ------------------------------------- |
+| Sem Bearer, ou access token inválido/expirado | 401    | `Unauthorized`                        |
+| Sem `X-Client-Type`                           | 400    | `x-client-type header is required...` |
+
 ## Erros
 
 Todo erro sai neste formato (filtro global):
@@ -201,7 +235,7 @@ Todo erro sai neste formato (filtro global):
 | 401    | Credenciais erradas, email inexistente, conta só-Google, access token ausente/inválido/expirado, refresh token ausente/inválido/expirado/revogado, código de troca inválido | Em request comum, tenta refresh; em `/auth/refresh`, faz logout local |
 | 404    | Token válido de um usuário que foi apagado                                                                                                                                  | Limpa a sessão local                                                  |
 | 409    | `POST /auth/signup` com email já cadastrado; `POST /activities/import` com arquivo já importado                                                                             | Mostra "email já em uso" (signup) ou "já importada" (importação)      |
-| 429    | Rate limit: 10 req/min por IP em `/auth/login` e `/auth/signup`; 20 em `POST /activities/import`; 100 no resto                                                              | Mostra "muitas tentativas, aguarde"                                   |
+| 429    | Rate limit: 10 req/min por IP em `/auth/login`, `/auth/signup` e `/auth/logout-all`; 20 em `POST /activities/import`; 100 no resto                                         | Mostra "muitas tentativas, aguarde"                                   |
 
 Casos específicos do refresh token:
 
@@ -399,6 +433,12 @@ limpe todo o estado local. O access token continua tecnicamente válido até
 expirar (é stateless), por isso descartá-lo no app é obrigatório. O logout é
 idempotente (204 mesmo sem token), então a limpeza local deve acontecer
 independentemente da resposta.
+
+"Sair de todos os dispositivos" (`POST /auth/logout-all`, ver
+[acima](#sair-de-todos-os-dispositivos)) é diferente num ponto: as outras
+sessões só caem com o 204. Um 401 por access token expirado é tratado pelo
+`Authenticator` como em qualquer request (renova e repete); limpe o estado
+local depois do 204.
 
 ## Lacunas conhecidas
 

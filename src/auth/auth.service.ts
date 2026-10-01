@@ -102,6 +102,34 @@ export class AuthService {
   }
 
   /**
+   * "Sair de todos os dispositivos" (A-08): apaga, numa transação, todos os
+   * refresh tokens do usuário (todas as famílias) e os códigos de troca do
+   * Google pendentes. Idempotente: sem sessões, não há o que apagar.
+   *
+   * Apagar, e não marcar `revokedAt`, pelo mesmo motivo do logout e do A-01:
+   * uma linha só marcada ainda passaria pela janela de tolerância (e ganharia
+   * um par novo) ou pela detecção de reuso. Apagada, qualquer token
+   * reapresentado é "não encontrado" (401 simples).
+   *
+   * Os access tokens já emitidos continuam válidos até expirar (stateless).
+   */
+  async logoutAll(userId: string, ctx: SecurityContext): Promise<void> {
+    const sessionsRemoved = await this.prisma.$transaction(async (tx) => {
+      // Contadas antes do DELETE, só para o log: um login concorrente pode
+      // ser apagado sem entrar na contagem.
+      const families = await tx.refreshToken.findMany({
+        where: { userId },
+        distinct: ['familyId'],
+        select: { familyId: true },
+      });
+      await tx.refreshToken.deleteMany({ where: { userId } });
+      await tx.oAuthExchangeCode.deleteMany({ where: { userId } });
+      return families.length;
+    });
+    this.securityLog.log('logout_all', ctx, { userId, sessionsRemoved });
+  }
+
+  /**
    * Chamado pela GoogleStrategy após o Google confirmar a identidade.
    *
    * 1. Já existe usuário com este googleId  -> login.

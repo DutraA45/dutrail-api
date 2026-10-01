@@ -112,6 +112,7 @@ Variáveis principais (todas validadas no boot — ver `src/config/env.validatio
 | `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200`       |
 | `COOKIE_SECURE`                             | Flag `Secure` do cookie do refresh (padrão `true`); `false` recusado em produção  |
 | `SECURITY_LOG_ENABLED`                      | Log de eventos de segurança (padrão `true`; `false` no `.env.test`)               |
+| `SCHEDULER_ENABLED`                         | Jobs agendados, como a [limpeza de tokens expirados](#limpeza-de-tokens-expirados) (padrão `true`; `false` no `.env.test`) |
 | `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                        |
 | `OCI_S3_ENDPOINT`                           | Endpoint S3-compatível do Object Storage (seção abaixo)                           |
 | `OCI_S3_REGION`                             | Região do bucket, ex. `sa-saopaulo-1`                                             |
@@ -203,6 +204,7 @@ só é registrado fora de produção: com `NODE_ENV=production`, `/docs`,
 | POST   | `/auth/login`           | —             | obrigatório     | Login. 200 → tokens + user; 401 genérico                   |
 | POST   | `/auth/refresh`         | refresh token | obrigatório     | Novo par de tokens; o antigo é invalidado (rotação)        |
 | POST   | `/auth/logout`          | refresh token | obrigatório     | Revoga o refresh token. 204                                |
+| POST   | `/auth/logout-all`      | Bearer        | obrigatório     | Encerra todas as sessões do usuário (todos os dispositivos). 204 |
 | GET    | `/auth/google`          | —             | —               | Redireciona para o consentimento do Google                 |
 | GET    | `/auth/google/callback` | —             | —               | Retorno do Google → redirect para o frontend com `?code=` ou `?error=` |
 | POST   | `/auth/google/exchange` | código        | obrigatório     | Troca o código de uso único por tokens                     |
@@ -224,6 +226,7 @@ silencioso, porque escolher um entregaria o token pelo canal errado.
 | Corpo da resposta      | `accessToken` (+ `user`)                                                                             | `accessToken`, `refreshToken` (+ `user`) |
 | Token no canal errado  | 400                                                                                                  | 400                                      |
 | No logout              | Revoga no banco + `clearCookie`                                                                      | Revoga no banco                          |
+| No logout-all          | Apaga todas as sessões + `clearCookie`                                                               | Apaga todas as sessões                   |
 
 Rotação, detecção de reuso e revogação são **idênticas** nos dois: a única
 diferença é o transporte (`RefreshTokenTransport`). O cliente web precisa de
@@ -254,6 +257,10 @@ Formato de erro (todas as rotas, via `AllExceptionsFilter`):
    token, dentro de `REFRESH_GRACE_SECONDS`; um 401 do refresh encerra a sessão
    local.
 4. `POST /auth/logout` ao sair — web também tem o cookie apagado pela resposta.
+5. "Sair de todos os dispositivos": `POST /auth/logout-all` com o Bearer. Apaga
+   todas as sessões do usuário (web e mobile); os outros dispositivos recebem
+   401 no próximo refresh. O access token atual continua válido até expirar,
+   então o cliente o descarta e limpa o estado local.
 
 Google: abra `GET /auth/google` numa janela do browser. Após o consentimento a
 API redireciona para `FRONTEND_URL/auth/callback?code=...`; o frontend chama
@@ -283,7 +290,11 @@ ponta (login CSRF, injeção de `code`, cookie adulterado/expirado, cancelamento
 erros do Google e varredura dos logs).
 `test/refresh-token-families.e2e-spec.ts` cobre famílias, janela de
 tolerância (resposta perdida, requests concorrentes, terceiro uso, fim da
-janela simulado recuando o `rotatedAt`) e o rollback da rotação, e
+janela simulado recuando o `rotatedAt`) e o rollback da rotação.
+`test/logout-all.e2e-spec.ts` cobre o logout de todos os dispositivos
+(inclusive um token recém-rotacionado reapresentado depois dele), e
+`test/expired-tokens-cleanup.e2e-spec.ts`, a limpeza de tokens expirados e o
+registro do job conforme `SCHEDULER_ENABLED`. Por fim,
 `test/migrations.e2e-spec.ts` aplica as migrations num schema descartável e
 confere o backfill do `familyId` sobre linhas criadas antes dele.
 O storage dos `.fit` também é um fake em memória, o que permite simular falha
@@ -382,7 +393,7 @@ herda a família. Cada linha de `RefreshToken` está num de três estados:
 | --------------- | ---------------------------------------------------- | ------------------------------------------------ |
 | Ativo           | `revokedAt` nulo                                     | Rotaciona normalmente                            |
 | Rotacionado     | `revokedAt` e `rotatedAt` preenchidos, `successorId` | Janela de tolerância ou reuso (abaixo)           |
-| Inexistente     | Apagado por logout, pelo A-01 ou pelo reuso          | 401 simples, sem efeito colateral                |
+| Inexistente     | Apagado por logout, logout-all, A-01, reuso ou limpeza | 401 simples, sem efeito colateral              |
 
 **Rotação transacional (A-17).** Numa única `$transaction`: o CAS
 (`updateMany where id e revokedAt nulo`, gravando `revokedAt` e `rotatedAt`),
@@ -400,7 +411,7 @@ não falha direto: recarrega a linha e segue a regra de token rotacionado.
    apagá-lo. Uma resposta de refresh perdida na rede móvel, ou duas abas
    renovando juntas, não derrubam ninguém. Evento `refresh_grace_used` (warn).
    Vale **uma vez** por token rotacionado.
-2. **Sucessor apagado** (logout, A-01): a sessão já tinha acabado. 401
+2. **Sucessor apagado** (logout, logout-all, A-01): a sessão já tinha acabado. 401
    simples, nada é alterado.
 3. **Reuso** (fora da janela, tolerância já usada, ou sucessor que já
    rotacionou, ou seja, o dono já recebeu e usou o token novo): o servidor
@@ -422,14 +433,56 @@ no banco, mas, com o sucessor apagado, reapresentá-lo cai no item 2.
   a janela é curta, de uso único e configurável, e `refresh_grace_used` deve
   gerar alerta (ver [Logs de segurança](#logs-de-segurança)). O par do
   atacante continua valendo enquanto ele o renovar: só cai se a família for
-  apagada (reuso detectado nela, ou o A-01). O logout do dono apaga só a linha
-  dele, não a família.
+  apagada (reuso detectado nela, o A-01 ou o logout-all). O logout do dono
+  apaga só a linha dele, não a família; para derrubar tudo, o dono usa
+  `POST /auth/logout-all`.
 - A tolerância vale uma vez por token: uma resposta perdida duas vezes
   seguidas (ou três abas renovando ao mesmo tempo) cai em reuso e encerra a
   sessão daquele dispositivo.
 - Linhas anteriores à migration `refresh_token_families` viraram uma família
   cada (sem cadeia de rotação conhecida). Uma delas já revogada que volte a
   aparecer conta como reuso e apaga só a si mesma.
+
+### Logout de todos os dispositivos
+
+`POST /auth/logout-all` (A-08) exige Bearer e `X-Client-Type`, e numa
+`$transaction` **apaga** todas as linhas de `RefreshToken` do usuário (todas as
+famílias) e os `OAuthExchangeCode` pendentes dele. No web, a resposta também
+apaga o cookie do browser que chamou. Responde 204, inclusive sem sessões
+(idempotente), e tem o rate limit estrito do login (10/min por IP).
+
+Apagar, e não marcar `revokedAt`, pelo mesmo motivo do logout: apagado, um
+token reapresentado é "não encontrado" (401 simples). Uma linha só marcada
+continuaria rotacionada no banco, e o token anterior dela na família cairia na
+detecção de reuso (um `refresh_reuse_detected` falso para cada dispositivo
+deslogado).
+
+O access token é stateless: o atual e os dos outros dispositivos continuam
+valendo até expirar (`JWT_ACCESS_TTL`). Os outros dispositivos recebem 401 no
+próximo refresh. Evento `logout_all`, com a quantidade de sessões apagadas.
+
+### Limpeza de tokens expirados
+
+Um job diário (`@nestjs/schedule`, 03:00 UTC) no
+`ExpiredTokensCleanupService` apaga os `RefreshToken` e `OAuthExchangeCode`
+com `expiresAt` anterior a agora (A-12). Sem ele as tabelas cresceriam sem
+limite, guardando metadados de sessão além do necessário. Cada execução
+registra só as contagens (`refreshTokens=N exchangeCodes=N`), sem ids nem
+dados pessoais. O método `purgeExpired()` é público e devolve as contagens.
+
+Só o que expirou é apagado: um token rotacionado ainda dentro do `expiresAt`
+continua no banco, porque é ele que faz a janela de tolerância e a detecção de
+reuso funcionarem. Depois do `expiresAt` o JWT também expirou (é o mesmo
+prazo), então a linha não serve para mais nada.
+
+`SCHEDULER_ENABLED=false` não registra job nenhum (o `ScheduleModule` nem é
+importado); o `.env.test` usa `false`.
+
+> **Uma instância só.** O agendamento roda dentro do processo da API e não
+> tem lock: com mais de uma instância, cada uma executaria o job. Os DELETEs
+> são idempotentes, mas o trabalho se repetiria. Ao escalar horizontalmente,
+> deixe `SCHEDULER_ENABLED=true` em uma instância só ou adote um lock (ex.:
+> `pg_try_advisory_lock`).
 
 ### Login com Google: state, PKCE e erros
 
@@ -566,6 +619,7 @@ testes.
 | `refresh_invalid`         | warn            | Refresh recusado. O cliente recebe sempre `Invalid refresh token` (ou `Missing refresh token` sem token) | `missing_token`, `invalid_jwt`, `expired`, `not_found` (inclui o token cujo sucessor foi apagado no logout) |
 | `refresh_reuse_detected`  | warn            | Reuso de token rotacionado: **a família (sessão daquele dispositivo) foi apagada**; as outras sessões do usuário continuam. Com `familyId`. O cliente recebe o mesmo `Invalid refresh token` | —                                                            |
 | `logout`                  | log / warn      | Logout (warn só quando o token tem assinatura inválida, caso em que a resposta é 401)   | `no_token`, `not_found`, `invalid_jwt`, `expired`            |
+| `logout_all`              | log             | `POST /auth/logout-all`: todas as sessões do usuário apagadas. Com `sessionsRemoved` (quantas famílias; `0` se não havia nenhuma) | —                                                            |
 | `google_link`             | log / warn      | Conta Google vinculada a uma conta local com o mesmo email                              | `verified_account` (log), `unverified_takeover` (warn: senha e sessões descartadas, A-01) |
 | `google_exchange_success` | log             | `POST /auth/google/exchange` entregou tokens                                            | —                                                            |
 | `google_exchange_failed`  | warn            | Código de troca recusado, ou falha em `GET /auth/google/callback` (um `reason` por `?error=`) | troca: `not_found`, `used`, `expired`, `concurrent_use`; callback: `state_mismatch`, `access_denied`, `email_not_verified`, `callback_error` (= `oauth_failed`) |
@@ -573,8 +627,9 @@ testes.
 
 **Campos.** `event`, `timestamp` (ISO 8601) e, quando houver, `userId`, `ip`
 (`req.ip`), `userAgent` (truncado em 200 caracteres), `clientType`,
-`emailMasked`, `reason` e `familyId` (eventos de refresh; um uuid opaco que
-liga os eventos de uma mesma sessão, sem valor de credencial). O `reason` é
+`emailMasked`, `reason`, `familyId` (eventos de refresh; um uuid opaco que
+liga os eventos de uma mesma sessão, sem valor de credencial) e
+`sessionsRemoved` (`logout_all`). O `reason` é
 sempre um código fixo, garantido pelo
 tipo `SecurityReason`, e nunca texto livre nem mensagem de exceção. Campos
 ausentes não aparecem na linha.
@@ -619,9 +674,8 @@ são registradas pelo `GoogleCallbackFilter`, que também faz o redirect.
 
 ## Próximos passos sugeridos
 
-- Job para apagar `RefreshToken`/`OAuthExchangeCode` expirados (hoje só acumulam).
-- `POST /auth/logout-all` (A-08), **apagando** as linhas do usuário, como o
-  A-01: um token revogado sem apagar ainda passaria pela janela de tolerância.
+- Chamar o mesmo apagamento do logout-all na troca e no reset de senha,
+  quando existirem.
 - Verificação de email e reset de senha (exigem envio de email).
 - `POST /auth/google/token` recebendo o `idToken` do Google Sign-In nativo, para
   o app Android não depender do fluxo de redirect.

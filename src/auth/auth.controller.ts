@@ -15,6 +15,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import {
   ApiBadRequestResponse,
+  ApiBearerAuth,
   ApiConflictResponse,
   ApiExcludeEndpoint,
   ApiNoContentResponse,
@@ -30,6 +31,7 @@ import {
   ApiClientTypeHeader,
   ClientType,
 } from '../common/decorators/client-type.decorator.js';
+import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { Public } from '../common/decorators/public.decorator.js';
 import { ErrorResponseDto } from '../common/dto/error-response.dto.js';
 import { EnvironmentVariables } from '../config/env.validation.js';
@@ -55,20 +57,23 @@ import { RefreshTokenDto } from './dto/refresh-token.dto.js';
 import { SignupDto } from './dto/signup.dto.js';
 import { GoogleAuthGuard } from './guards/google-auth.guard.js';
 import { GoogleCallbackGuard } from './guards/google-callback.guard.js';
+import type { AuthenticatedUser } from './interfaces/authenticated-user.interface.js';
 import { RefreshTokenTransport } from './refresh-token-transport.service.js';
 
 /**
- * Limite mais apertado para rotas que aceitam credenciais: dificulta força
- * bruta e "credential stuffing". O limite global (THROTTLE_*) continua
- * valendo para o resto da API.
+ * Limite mais apertado para rotas que aceitam credenciais (força bruta,
+ * "credential stuffing") e para o logout-all (cada chamada apaga todas as
+ * sessões do usuário). O limite global (THROTTLE_*) continua valendo para o
+ * resto da API.
  */
 const CREDENTIALS_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
 
 const CLIENT_TYPE_ERROR =
   'Body inválido ou header X-Client-Type ausente/inválido';
 
-// Todas as rotas deste controller são @Public(): quem "autentica" aqui é a
-// própria credencial enviada (senha, refresh token, código do Google).
+// Quase todas as rotas deste controller são @Public(): quem "autentica" aqui é
+// a própria credencial enviada (senha, refresh token, código do Google). A
+// exceção é o /auth/logout-all, que exige Bearer (guard global).
 //
 // Cada handler monta o SecurityContext (ip, user-agent, client type) a partir
 // do `req` e o passa aos services, que registram os eventos de segurança.
@@ -235,6 +240,53 @@ export class AuthController {
     } else {
       this.securityLog.log('logout', ctx, { reason: 'no_token' });
     }
+    this.transport.clear(clientType, res);
+  }
+
+  /**
+   * Sem @Public(): o Bearer identifica o usuário. O refresh token não é lido
+   * (nem precisa estar presente); o X-Client-Type só define se há cookie do
+   * dispositivo atual para apagar.
+   */
+  @Post('logout-all')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Throttle(CREDENTIALS_THROTTLE)
+  @ApiBearerAuth()
+  @ApiClientTypeHeader()
+  @ApiOperation({
+    summary: 'Encerra todas as sessões do usuário (todos os dispositivos)',
+    description:
+      'Apaga todos os refresh tokens do usuário (todas as sessões, web e mobile) e os códigos de ' +
+      'troca do Google pendentes; no fluxo web, também apaga o cookie deste dispositivo. Os outros ' +
+      'dispositivos recebem 401 no próximo refresh. O access token atual (e os já emitidos) ' +
+      'continua válido até expirar (é stateless); o cliente deve descartá-lo. Idempotente: sem ' +
+      'sessões, também responde 204.',
+  })
+  @ApiNoContentResponse({
+    description: 'Sessões encerradas (ou não havia nenhuma)',
+  })
+  @ApiBadRequestResponse({
+    description: CLIENT_TYPE_ERROR,
+    type: ErrorResponseDto,
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Access token ausente, inválido ou expirado',
+    type: ErrorResponseDto,
+  })
+  @ApiTooManyRequestsResponse({
+    description: 'Rate limit excedido',
+    type: ErrorResponseDto,
+  })
+  async logoutAll(
+    @CurrentUser() current: AuthenticatedUser,
+    @ClientType() clientType: ClientType,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<void> {
+    await this.authService.logoutAll(
+      current.userId,
+      securityContextFrom(req, clientType),
+    );
     this.transport.clear(clientType, res);
   }
 

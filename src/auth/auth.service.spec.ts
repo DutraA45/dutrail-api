@@ -51,7 +51,7 @@ describe('AuthService', () => {
     $transaction: any;
   };
   let tx: {
-    refreshToken: { deleteMany: any };
+    refreshToken: { findMany: any; deleteMany: any };
     oAuthExchangeCode: { deleteMany: any };
   };
   let securityLog: { log: any; warn: any };
@@ -82,7 +82,7 @@ describe('AuthService', () => {
       $transaction: vi.fn((fn: (client: typeof tx) => unknown) => fn(tx)),
     };
     tx = {
-      refreshToken: { deleteMany: vi.fn() },
+      refreshToken: { findMany: vi.fn(), deleteMany: vi.fn() },
       oAuthExchangeCode: { deleteMany: vi.fn() },
     };
     securityLog = { log: vi.fn(), warn: vi.fn() };
@@ -423,6 +423,46 @@ describe('AuthService', () => {
         service.exchangeCode('a'.repeat(43), ctx),
       ).rejects.toBeInstanceOf(UnauthorizedException);
       expect(tokenService.issueTokenPair).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('logoutAll', () => {
+    it('apaga todas as sessões e os códigos de troca do usuário numa transação, e registra quantas', async () => {
+      tx.refreshToken.findMany.mockResolvedValue([
+        { familyId: 'f-web' },
+        { familyId: 'f-mobile' },
+      ]);
+
+      await service.logoutAll('user-1', ctx);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(tx.refreshToken.findMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+        distinct: ['familyId'],
+        select: { familyId: true },
+      });
+      // DELETE, nunca UPDATE de revokedAt: só o usuário, todas as famílias.
+      expect(tx.refreshToken.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+      });
+      expect(tx.oAuthExchangeCode.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+      });
+      expect(securityLog.log).toHaveBeenCalledWith('logout_all', ctx, {
+        userId: 'user-1',
+        sessionsRemoved: 2,
+      });
+    });
+
+    it('sem sessões: ainda conclui e registra zero', async () => {
+      tx.refreshToken.findMany.mockResolvedValue([]);
+
+      await service.logoutAll('user-1', ctx);
+
+      expect(securityLog.log).toHaveBeenCalledWith('logout_all', ctx, {
+        userId: 'user-1',
+        sessionsRemoved: 0,
+      });
     });
   });
 

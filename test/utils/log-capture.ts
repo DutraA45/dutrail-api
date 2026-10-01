@@ -24,6 +24,7 @@ export interface SecurityLine {
   emailMasked?: string;
   reason?: string;
   familyId?: string;
+  sessionsRemoved?: number;
 }
 
 const LEVELS = ['log', 'warn', 'error', 'debug', 'verbose', 'fatal'] as const;

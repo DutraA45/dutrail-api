@@ -549,6 +549,23 @@ describe('Log de segurança (e2e)', () => {
         .map((s) => createHash('sha256').update(s).digest('hex')),
     );
 
+    // Sair de todos os dispositivos (A-08), depois de colher os hashes (o
+    // logout-all apaga as linhas).
+    const families = await t.prisma.refreshToken.findMany({
+      where: { userId: signupUser.id },
+      distinct: ['familyId'],
+    });
+    await post('/auth/logout-all', 'web')
+      .set('Authorization', `Bearer ${exchanged.body.accessToken}`)
+      .expect(204);
+    expectEvent(logs, {
+      event: 'logout_all',
+      level: 'log',
+      userId: signupUser.id,
+      sessionsRemoved: families.length,
+    });
+    expect(families.length).toBeGreaterThan(0);
+
     // O fluxo emitiu de fato os eventos esperados...
     const emitted = new Set(logs.events().map((e) => e.event));
     for (const event of [
@@ -560,6 +577,7 @@ describe('Log de segurança (e2e)', () => {
       'refresh_reuse_detected',
       'refresh_invalid',
       'logout',
+      'logout_all',
       'google_link',
       'google_exchange_success',
       'google_exchange_failed',
