@@ -32,6 +32,9 @@ const TTL_PATTERN = /^([1-9]\d*)([smhd])$/;
 export const ACCESS_TTL_MAX = { seconds: 3600, label: '1h' } as const;
 export const REFRESH_TTL_MAX = { seconds: 30 * 86_400, label: '30d' } as const;
 
+/** Teto da janela de tolerância do refresh token (A-04). */
+export const REFRESH_GRACE_MAX_SECONDS = 60;
+
 /** "15m" -> 900. `undefined` se o formato não for o aceito. */
 export function ttlToSeconds(value: unknown): number | undefined {
   if (typeof value !== 'string') return undefined;
@@ -125,6 +128,24 @@ export class EnvironmentVariables {
 
   @IsTtl(REFRESH_TTL_MAX)
   JWT_REFRESH_TTL: string = '7d';
+
+  // Janela de tolerância (A-04): por quantos segundos um refresh token recém-
+  // rotacionado ainda pode ser reapresentado uma vez (resposta perdida, duas
+  // abas) sem contar como reuso. Curta de propósito: quem tiver uma cópia do
+  // token também a aproveita. 0 desativa.
+  @Transform(({ obj, key }) => parseNonNegativeInt(obj[key]))
+  @ValidateBy({
+    name: 'isGraceSeconds',
+    validator: {
+      validate: (value) =>
+        Number.isInteger(value) &&
+        (value as number) >= 0 &&
+        (value as number) <= REFRESH_GRACE_MAX_SECONDS,
+      defaultMessage: () =>
+        `REFRESH_GRACE_SECONDS deve ser um inteiro de 0 a ${REFRESH_GRACE_MAX_SECONDS} (segundos; 0 desativa a janela de tolerância)`,
+    },
+  })
+  REFRESH_GRACE_SECONDS: number = 30;
 
   @IsString()
   @IsNotEmpty()
@@ -285,6 +306,17 @@ function parseBooleanFlag(raw: unknown): unknown {
   if (value === 'true' || value === true) return true;
   if (value === 'false' || value === false) return false;
   return raw;
+}
+
+/**
+ * Só dígitos viram número. A conversão implícita leria "" como 0 (o que
+ * desligaria a janela sem aviso) e "1e1" como 10; o resto passa adiante e o
+ * validador o recusa.
+ */
+function parseNonNegativeInt(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw;
+  const value = raw.trim();
+  return /^\d+$/.test(value) ? Number(value) : raw;
 }
 
 /**

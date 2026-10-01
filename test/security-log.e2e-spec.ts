@@ -66,6 +66,11 @@ describe('Log de segurança (e2e)', () => {
   /** Um browser novo (cookie jar) com o User-Agent dos testes. */
   const browser = () => request.agent(t.app.getHttpServer());
 
+  const rowOf = (token: string) =>
+    t.prisma.refreshToken.findUniqueOrThrow({
+      where: { tokenHash: createHash('sha256').update(token).digest('hex') },
+    });
+
   async function signup(): Promise<{ userId: string; refreshToken: string }> {
     const res = await post('/auth/signup').send(credentials).expect(201);
     return {
@@ -148,19 +153,41 @@ describe('Log de segurança (e2e)', () => {
     });
   });
 
-  it('refresh, reuso do token rotacionado (com userId) e falhas de refresh', async () => {
+  it('refresh, janela de tolerância, reuso (com userId e familyId) e falhas de refresh', async () => {
     const { userId, refreshToken } = await signup();
+    const { familyId } = await rowOf(refreshToken);
     logs.clear();
 
     await post('/auth/refresh').send({ refreshToken }).expect(200);
-    expectEvent(logs, { event: 'refresh_success', level: 'log', userId });
-
-    await post('/auth/refresh').send({ refreshToken }).expect(401);
     expectEvent(logs, {
+      event: 'refresh_success',
+      level: 'log',
+      userId,
+      familyId,
+    });
+
+    // Retry com o mesmo token dentro da janela (resposta perdida).
+    logs.clear();
+    await post('/auth/refresh').send({ refreshToken }).expect(200);
+    const grace = expectEvent(logs, {
+      event: 'refresh_grace_used',
+      level: 'warn',
+      userId,
+      familyId,
+    });
+    expect(grace.reason).toBeUndefined();
+
+    // Terceira vez: a tolerância já foi usada, então é reuso.
+    logs.clear();
+    await post('/auth/refresh').send({ refreshToken }).expect(401);
+    const reuse = expectEvent(logs, {
       event: 'refresh_reuse_detected',
       level: 'warn',
       userId,
+      familyId,
     });
+    expect(reuse.reason).toBeUndefined();
+    expect(await t.prisma.refreshToken.count({ where: { familyId } })).toBe(0);
 
     await post('/auth/refresh').send({}).expect(401);
     expectEvent(logs, { event: 'refresh_invalid', reason: 'missing_token' });
@@ -182,12 +209,18 @@ describe('Log de segurança (e2e)', () => {
     const refresh = (body: object) =>
       post('/auth/refresh').send(body).expect(401);
 
-    // Rotaciona: o token original vira candidato a reuso, e o novo, apagado
-    // no logout, vira "não encontrado".
+    // Rotaciona duas vezes e desloga: o token original (cujo sucessor já
+    // rotacionou) vira reuso; o do meio, cujo sucessor foi apagado no logout,
+    // e o último, apagado, viram "não encontrado".
+    const { familyId } = await rowOf(refreshToken);
     const rotated = await post('/auth/refresh')
       .send({ refreshToken })
       .expect(200);
-    const loggedOut = rotated.body.refreshToken as string;
+    const middle = rotated.body.refreshToken as string;
+    const rotatedAgain = await post('/auth/refresh')
+      .send({ refreshToken: middle })
+      .expect(200);
+    const loggedOut = rotatedAgain.body.refreshToken as string;
     await post('/auth/logout').send({ refreshToken: loggedOut }).expect(204);
     logs.clear();
 
@@ -219,9 +252,19 @@ describe('Log de segurança (e2e)', () => {
         expected: { event: 'refresh_invalid', reason: 'not_found', userId },
       },
       {
+        label: 'sucessor apagado no logout',
+        token: middle,
+        expected: {
+          event: 'refresh_invalid',
+          reason: 'not_found',
+          userId,
+          familyId,
+        },
+      },
+      {
         label: 'reuso',
         token: refreshToken,
-        expected: { event: 'refresh_reuse_detected', userId },
+        expected: { event: 'refresh_reuse_detected', userId, familyId },
       },
     ];
 
@@ -416,21 +459,34 @@ describe('Log de segurança (e2e)', () => {
     )![1];
     secrets.push(webLogin.body.accessToken, decodeURIComponent(cookieToken));
 
-    // Refresh, reuso e logout.
+    // Refresh, retry dentro da janela, reuso e logout.
     const mobileRt = signupRes.body.refreshToken as string;
     const rotated = await post('/auth/refresh')
       .send({ refreshToken: mobileRt })
       .expect(200);
     secrets.push(rotated.body.accessToken, rotated.body.refreshToken);
+    const graced = await post('/auth/refresh')
+      .send({ refreshToken: mobileRt })
+      .expect(200);
+    secrets.push(graced.body.accessToken, graced.body.refreshToken);
+    // Terceira vez: reuso, que apaga a família do mobile...
     await post('/auth/refresh').send({ refreshToken: mobileRt }).expect(401);
-    // A sessão web caiu junto com o reuso: o cookie dela também é reuso.
-    await webPost('/auth/refresh').expect(401);
+    // ...e só ela: a sessão web é outra família e continua valendo.
+    const webRefreshed = await webPost('/auth/refresh').expect(200);
+    const webCookie = /refreshToken=([^;]+)/.exec(
+      String(webRefreshed.headers['set-cookie']),
+    )![1];
+    secrets.push(webRefreshed.body.accessToken, decodeURIComponent(webCookie));
+    const relogin = await post('/auth/login')
+      .send({ email: credentials.email, password: credentials.password })
+      .expect(200);
+    secrets.push(relogin.body.accessToken, relogin.body.refreshToken);
     await post('/auth/logout')
-      .send({ refreshToken: rotated.body.refreshToken })
+      .send({ refreshToken: relogin.body.refreshToken })
       .expect(204);
     // Token apagado no logout: "não encontrado", sem acionar o reuso.
     await post('/auth/refresh')
-      .send({ refreshToken: rotated.body.refreshToken })
+      .send({ refreshToken: relogin.body.refreshToken })
       .expect(401);
     expectEvent(logs, { event: 'refresh_invalid', reason: 'not_found' });
 
@@ -485,6 +541,13 @@ describe('Log de segurança (e2e)', () => {
       createHash('sha256').update(credentials.email).digest('hex'),
     );
     if (signupUser.passwordHash) secrets.push(signupUser.passwordHash);
+    // Hashes dos tokens que já sumiram do banco (família apagada no reuso,
+    // logout) também.
+    secrets.push(
+      ...secrets
+        .filter((s) => s.split('.').length === 3)
+        .map((s) => createHash('sha256').update(s).digest('hex')),
+    );
 
     // O fluxo emitiu de fato os eventos esperados...
     const emitted = new Set(logs.events().map((e) => e.event));
@@ -493,6 +556,7 @@ describe('Log de segurança (e2e)', () => {
       'login_failed',
       'login_success',
       'refresh_success',
+      'refresh_grace_used',
       'refresh_reuse_detected',
       'refresh_invalid',
       'logout',
@@ -508,6 +572,16 @@ describe('Log de segurança (e2e)', () => {
       true,
     );
     expect(logs.lines.length).toBeGreaterThan(0);
+    // Os eventos da família trazem userId e familyId (um uuid opaco).
+    for (const event of ['refresh_grace_used', 'refresh_reuse_detected']) {
+      const line = logs.events().find((e) => e.event === event)!;
+      expect(line.level, event).toBe('warn');
+      expect(line.userId, event).toBe(signupUser.id);
+      expect(line.familyId, event).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
+    }
+
     for (const { text } of logs.lines) {
       for (const secret of secrets) {
         expect(text, 'segredo encontrado no log').not.toContain(secret);

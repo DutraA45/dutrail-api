@@ -10,6 +10,7 @@ import {
   NodeEnv,
   PLACEHOLDER_FRAGMENTS,
   PRODUCTION_JWT_SECRET_MIN_LENGTH,
+  REFRESH_GRACE_MAX_SECONDS,
   validateEnv,
 } from './env.validation.js';
 
@@ -263,6 +264,48 @@ describe('validateEnv', () => {
       expect(message).not.toContain(exampleEnv.JWT_SECRET);
       expect(message).not.toContain(exampleEnv.JWT_REFRESH_SECRET);
     });
+  });
+
+  describe('REFRESH_GRACE_SECONDS', () => {
+    const { REFRESH_GRACE_SECONDS: _omitted, ...withoutGrace } = exampleEnv;
+
+    it('é 30 por padrão (variável ausente), e os arquivos versionados usam 30', () => {
+      expect(validateEnv(withoutGrace).REFRESH_GRACE_SECONDS).toBe(30);
+      expect(validateEnv(exampleEnv).REFRESH_GRACE_SECONDS).toBe(30);
+      expect(validateEnv(testEnv).REFRESH_GRACE_SECONDS).toBe(30);
+    });
+
+    it.each([
+      ['0', 0],
+      ['1', 1],
+      ['60', 60],
+      [' 45 ', 45],
+    ])('aceita "%s"', (value, expected) => {
+      expect(
+        validateEnv({ ...exampleEnv, REFRESH_GRACE_SECONDS: value })
+          .REFRESH_GRACE_SECONDS,
+      ).toBe(expected);
+    });
+
+    // "" e "1e1" passariam pela conversão implícita (0 e 10).
+    it.each(['61', '-1', '1.5', '30s', 'abc', '', '1e1', '0x1f'])(
+      'recusa "%s" com a regra, sem repetir o valor',
+      (value) => {
+        const message = validationMessage({
+          ...exampleEnv,
+          REFRESH_GRACE_SECONDS: value,
+        });
+        expect(message).toContain(
+          `REFRESH_GRACE_SECONDS deve ser um inteiro de 0 a ${REFRESH_GRACE_MAX_SECONDS} (segundos; 0 desativa a janela de tolerância)`,
+        );
+        // Uma linha só para a variável, e nenhum valor recebido no texto.
+        expect(message.match(/REFRESH_GRACE_SECONDS/g)).toHaveLength(1);
+        if (value.trim() !== '') {
+          expect(message).not.toContain(`"${value}"`);
+        }
+        expect(message).not.toContain(exampleEnv.JWT_SECRET);
+      },
+    );
   });
 
   describe('JWT_ISSUER', () => {

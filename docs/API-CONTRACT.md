@@ -85,14 +85,47 @@ servidor; não são garantia e podem mudar por ambiente.
 | ------- | ----------------- | ---------- |
 | Access  | `JWT_ACCESS_TTL`  | 15 minutos |
 | Refresh | `JWT_REFRESH_TTL` | 7 dias     |
+| Repetição do refresh já usado (tolerância) | `REFRESH_GRACE_SECONDS` | 30 segundos (máximo 60; 0 desativa) |
 
 A validade do refresh token é uma **janela deslizante**, igual nos dois fluxos:
 cada chamada bem-sucedida a `/auth/refresh` emite um refresh token novo com a
 validade completa contada a partir daquele momento, e não herda o prazo do login
 original. Não há limite absoluto de duração da sessão: ela só expira se o
 cliente passar um período inteiro de `JWT_REFRESH_TTL` sem renovar, ou se for
-revogada (logout ou detecção de reuso). Por isso o cliente não precisa agendar
-renovação: basta renovar ao receber 401 (ver [Interceptor](#interceptor)).
+encerrada (logout, ou detecção de reuso naquela sessão). Por isso o cliente não
+precisa agendar renovação: basta renovar ao receber 401 (ver
+[Interceptor](#interceptor)).
+
+### Sessões e janela de tolerância
+
+Cada login (senha, signup ou Google) abre uma **sessão própria daquele
+cliente** (um browser, um celular), e as renovações dela continuam na mesma
+sessão. Igual nos dois fluxos.
+
+Um refresh token que acabou de ser trocado em `/auth/refresh` ainda pode ser
+reapresentado **uma única vez**, por até `REFRESH_GRACE_SECONDS` (30 segundos
+no padrão) contados daquela troca, e recebe um par novo e válido da mesma
+sessão. Isso cobre:
+
+- **resposta perdida**: o servidor renovou, mas a resposta não chegou
+  (timeout, troca de rede). O cliente ainda tem o token antigo: no web, o
+  cookie não foi sobrescrito; no mobile, o token salvo. Um erro de rede no
+  refresh **pode ser repetido com o mesmo refresh token** dentro da janela;
+- **duas abas** renovando ao mesmo tempo com o mesmo cookie: as duas recebem
+  um par válido, e nenhuma é deslogada.
+
+Fora disso, reapresentar um refresh token já usado é **reuso** (o servidor
+interpreta como roubo): ele encerra **a sessão daquele cliente** (todos os
+tokens dela) e responde 401 `Invalid refresh token`. As sessões do mesmo
+usuário em outros dispositivos **não** são afetadas. Contam como reuso: repetir
+depois da janela, repetir o mesmo token pela segunda vez (a tolerância vale uma
+vez) e repetir um token depois que o seu substituto já foi usado num refresh.
+Fora da janela, portanto, o 401 encerra a sessão local.
+
+No web, três ou mais abas renovando exatamente ao mesmo tempo esgotam a
+tolerância e derrubam a sessão do browser. Se o app abrir muitas abas,
+serialize o refresh entre elas (por exemplo, com a Web Locks API,
+`navigator.locks.request('refresh', ...)`).
 
 No fluxo web, o `Max-Age` do cookie acompanha a validade real do refresh token
 emitido (o `exp` do JWT, que segue `JWT_REFRESH_TTL`): o browser descarta o
@@ -212,15 +245,15 @@ Casos específicos do refresh token:
 | `web` com `refreshToken` no corpo                                                          | 400    | `must not be sent in the request body...`             |
 | `mobile` com cookie `refreshToken` na request                                              | 400    | `must not be sent when X-Client-Type is mobile...`    |
 | `/auth/refresh` sem token no canal certo (cookie ou corpo vazios)                          | 401    | `Missing refresh token`                               |
-| `/auth/refresh` com token recusado: inválido, expirado, desconhecido, revogado ou já usado | 401    | `Invalid refresh token`                               |
+| `/auth/refresh` com token recusado: inválido, expirado, desconhecido, encerrado ou já usado fora da tolerância | 401    | `Invalid refresh token`                               |
 | `/auth/logout` com JWT inválido ou expirado (token desconhecido: 204)                      | 401    | `Invalid refresh token`                               |
 | `/auth/logout` sem token no canal certo                                                    | 204    | — (idempotente; web ainda recebe a limpeza do cookie) |
 
 Senha errada e email inexistente retornam **o mesmo** 401 com
 `"Invalid credentials"`, de propósito (não revelar quais emails existem).
 Pelo mesmo motivo, todo refresh token enviado e recusado recebe o mesmo 401
-`"Invalid refresh token"`, inclusive quando o backend detecta reuso e derruba
-as outras sessões do usuário. O motivo fica só no log do servidor. O cliente
+`"Invalid refresh token"`, inclusive quando o backend detecta reuso e encerra
+a sessão daquele cliente. O motivo fica só no log do servidor. O cliente
 não tem como (nem precisa) distinguir os casos: trate como sessão encerrada.
 
 ## Login com Google
@@ -332,9 +365,12 @@ Quatro regras que o backend impõe, em ordem de gravidade:
 1. **`/auth/refresh` é de uso único e devolve token novo.** No mobile,
    substitua o access _e_ o refresh; guardar o refresh antigo quebra a próxima
    renovação. No web isso é automático (o cookie é sobrescrito).
-2. **Reapresentar um refresh token já rotacionado revoga todas as sessões do
-   usuário** (o backend interpreta como roubo). Garanta **um único refresh em
-   voo**, com as demais requests em fila.
+2. **Reapresentar um refresh token já rotacionado encerra a sessão daquele
+   cliente** (o backend interpreta como roubo), exceto uma única repetição
+   dentro da [janela de tolerância](#sessões-e-janela-de-tolerância). As
+   sessões em outros dispositivos continuam. Garanta **um único refresh em
+   voo**, com as demais requests em fila: a tolerância é para a resposta
+   perdida, não para refreshes paralelos.
 3. **Não intercepte as rotas de auth.** Um 401 de `/auth/login` ou
    `/auth/refresh` não deve disparar refresh — gera laço infinito.
 4. **Todas as chamadas precisam de `X-Client-Type`** (e, no web, de
@@ -367,8 +403,16 @@ intercept(req: HttpRequest<unknown>, next: HttpHandler) {
         withCredentials: true,
         headers: { 'X-Client-Type': 'web' },
       }).pipe(
+        // Erro de rede (status 0): a renovação pode ter acontecido e a resposta
+        // se perdido. O cookie não foi sobrescrito, então repetir UMA vez, logo,
+        // cai na janela de tolerância e devolve um par válido.
+        retry({ count: 1, delay: e => (e.status === 0 ? timer(300) : throwError(() => e)) }),
         tap(({ accessToken }) => tokens.setAccess(accessToken)),
-        catchError(e => { tokens.clear(); router.navigate(['/login']); return throwError(() => e); }),
+        catchError(e => {
+          // Só o 401 encerra a sessão local. Em erro de rede, mantém o estado.
+          if (e.status === 401) { tokens.clear(); router.navigate(['/login']); }
+          return throwError(() => e);
+        }),
         finalize(() => { refreshing = null; }),
         shareReplay(1),                                // regra 2: um só em voo
       );
@@ -385,12 +429,16 @@ intercept(req: HttpRequest<unknown>, next: HttpHandler) {
 
 No mobile é o mesmo esqueleto, com duas diferenças: `X-Client-Type: mobile`,
 e o refresh manda/recebe o token no corpo (`{ refreshToken }` → salvar o novo).
-No Android, o equivalente é um `Authenticator`/`Interceptor` do OkHttp, com a
-mesma regra de um único refresh em voo.
+Em erro de rede, mantenha o refresh token enviado (não há outro: o novo, se
+existiu, não chegou) e repita uma vez com ele. No Android, o equivalente é um
+`Authenticator`/`Interceptor` do OkHttp, com a mesma regra de um único refresh
+em voo; o passo a passo está em
+[AUTH-CONTRACT-MOBILE.md](AUTH-CONTRACT-MOBILE.md#erro-de-rede-no-refresh).
 
 Na inicialização do app: chame `/auth/refresh` **antes** de renderizar rotas
 protegidas (web: basta o cookie; mobile: se houver token salvo) e trate 401
-como "sessão expirada".
+como "sessão expirada". Erro de rede ali segue a mesma regra: não limpa a
+sessão e pode ser repetido uma vez com o mesmo token.
 
 No logout, chame `POST /auth/logout` e limpe o estado local. O access token
 continua tecnicamente válido até expirar (é stateless), por isso descartá-lo no

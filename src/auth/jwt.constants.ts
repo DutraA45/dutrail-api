@@ -9,7 +9,7 @@ export const REFRESH_TOKEN_AUDIENCE = 'dutrail-refresh';
 
 /**
  * Única mensagem do 401 para refresh token recebido e recusado (A-18): JWT
- * inválido, expirado, não encontrado, reuso ou rotação concorrente. O motivo
- * específico vai só para o log de segurança.
+ * inválido, expirado, não encontrado ou reuso. O motivo específico vai só
+ * para o log de segurança.
  */
 export const INVALID_REFRESH_TOKEN_MESSAGE = 'Invalid refresh token';

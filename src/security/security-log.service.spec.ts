@@ -80,6 +80,32 @@ describe('SecurityLogService', () => {
     expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('ana@example.com');
   });
 
+  it('refresh_grace_used e refresh_reuse_detected: warn com userId e familyId, nada além', () => {
+    const familyId = '6f1c2a8e-3b4d-4e5f-9a7b-1c2d3e4f5a6b';
+    const service = createService();
+    service.warn('refresh_grace_used', ctx, { userId: 'user-1', familyId });
+    service.warn('refresh_reuse_detected', ctx, { userId: 'user-1', familyId });
+
+    expect(logSpy).not.toHaveBeenCalled();
+    const [grace, reuse] = warnSpy.mock.calls.map(
+      (call) => JSON.parse(call[0] as string) as Record<string, unknown>,
+    );
+    for (const [line, event] of [
+      [grace, 'refresh_grace_used'],
+      [reuse, 'refresh_reuse_detected'],
+    ] as const) {
+      expect(line).toEqual({
+        event,
+        timestamp: expect.any(String),
+        userId: 'user-1',
+        familyId,
+        ip: '203.0.113.7',
+        userAgent: 'Mozilla/5.0',
+        clientType: 'web',
+      });
+    }
+  });
+
   it('omite os campos ausentes (sem userId, client type ou reason)', () => {
     createService().warn('rate_limited', { ip: '10.0.0.1' });
 

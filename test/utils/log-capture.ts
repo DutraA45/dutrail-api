@@ -23,6 +23,7 @@ export interface SecurityLine {
   clientType?: string;
   emailMasked?: string;
   reason?: string;
+  familyId?: string;
 }
 
 const LEVELS = ['log', 'warn', 'error', 'debug', 'verbose', 'fatal'] as const;

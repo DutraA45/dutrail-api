@@ -33,18 +33,33 @@ model User {
 
 /// Uma linha por refresh token emitido. Guardamos apenas o SHA-256 do token:
 /// um vazamento do banco não permite forjar sessões.
+///
+/// Estados: ativo (`revokedAt` nulo), rotacionado (`revokedAt` e `rotatedAt`
+/// preenchidos; só serve à janela de tolerância ou para detectar reuso) e
+/// inexistente (apagado por logout, A-01 ou detecção de reuso).
 model RefreshToken {
-  id        String    @id @default(uuid())
-  tokenHash String    @unique
-  userId    String
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt DateTime
-  // Preenchido no logout ou na rotação. Um token revogado que volta a ser
-  // apresentado indica reuso (roubo) e derruba todas as sessões do usuário.
-  revokedAt DateTime?
-  createdAt DateTime  @default(now())
+  id          String    @id @default(uuid())
+  tokenHash   String    @unique
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Família = a sessão de um dispositivo: nasce no login/signup/troca do
+  // Google e é herdada na rotação. O reuso derruba só a família.
+  familyId    String    @db.Uuid
+  expiresAt   DateTime
+  // Preenchido na rotação, junto com `rotatedAt`. Linhas anteriores à
+  // migration de famílias podem ter só `revokedAt`.
+  revokedAt   DateTime?
+  rotatedAt   DateTime?
+  // Id do token emitido na rotação. Sem FK de propósito: um id que não existe
+  // mais significa "sucessor apagado" (logout), e reapresentar o token antigo
+  // vira um 401 simples, sem efeito colateral.
+  successorId String?
+  // Uso único da janela de tolerância (REFRESH_GRACE_SECONDS).
+  graceUsedAt DateTime?
+  createdAt   DateTime  @default(now())
 
   @@index([userId])
+  @@index([familyId])
 }
 
 /// Código de uso único gerado no callback do Google. O frontend troca esse
