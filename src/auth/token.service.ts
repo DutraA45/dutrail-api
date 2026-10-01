@@ -11,6 +11,12 @@ import type {
   AccessTokenPayload,
   RefreshTokenPayload,
 } from './interfaces/jwt-payload.interface.js';
+import {
+  ACCESS_TOKEN_AUDIENCE,
+  INVALID_REFRESH_TOKEN_MESSAGE,
+  JWT_ALGORITHM,
+  REFRESH_TOKEN_AUDIENCE,
+} from './jwt.constants.js';
 
 export interface TokenPair {
   accessToken: string;
@@ -33,6 +39,9 @@ type RefreshJwtCheck =
  * cujo SHA-256 é persistido. Isso permite revogar (logout), rotacionar e
  * detectar reuso. Guardar só o hash significa que um dump do banco não dá
  * sessões válidas a ninguém.
+ *
+ * Os dois levam `iss` (JWT_ISSUER) e um `aud` próprio do tipo, conferidos na
+ * verificação junto com o algoritmo (A-14).
  */
 @Injectable()
 export class TokenService {
@@ -64,6 +73,9 @@ export class TokenService {
     const accessToken = await this.jwt.signAsync(accessPayload, {
       secret: this.config.get('JWT_SECRET', { infer: true }),
       expiresIn: this.config.get('JWT_ACCESS_TTL', { infer: true }),
+      algorithm: JWT_ALGORITHM,
+      issuer: this.config.get('JWT_ISSUER', { infer: true }),
+      audience: ACCESS_TOKEN_AUDIENCE,
     });
 
     const refreshPayload: RefreshTokenPayload = {
@@ -73,6 +85,9 @@ export class TokenService {
     const refreshToken = await this.jwt.signAsync(refreshPayload, {
       secret: this.config.get('JWT_REFRESH_SECRET', { infer: true }),
       expiresIn: this.config.get('JWT_REFRESH_TTL', { infer: true }),
+      algorithm: JWT_ALGORITHM,
+      issuer: this.config.get('JWT_ISSUER', { infer: true }),
+      audience: REFRESH_TOKEN_AUDIENCE,
     });
 
     // Lê o `exp` calculado pelo jsonwebtoken em vez de parsear "7d" de novo.
@@ -91,7 +106,11 @@ export class TokenService {
 
   /**
    * Rotação: valida o refresh token recebido, revoga-o atomicamente e devolve
-   * um par novo. Qualquer falha vira o mesmo 401 genérico para não dar pistas.
+   * um par novo. Toda recusa de um token recebido (JWT inválido ou expirado,
+   * não encontrado, reuso, rotação concorrente) responde o mesmo 401 com
+   * "Invalid refresh token", para não dar pistas a quem roubou o token; o
+   * motivo fica só no log de segurança. Token ausente é tratado antes, no
+   * controller, com "Missing refresh token".
    */
   async rotateRefreshToken(
     refreshToken: string,
@@ -111,7 +130,7 @@ export class TokenService {
         userId: stored.userId,
         reason: 'concurrent_rotation',
       });
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
     }
 
     const pair = await this.issueTokenPair(stored.user);
@@ -135,7 +154,7 @@ export class TokenService {
     const check = this.verifyRefreshJwt(refreshToken);
     if ('reason' in check) {
       this.securityLog.warn('logout', ctx, { reason: check.reason });
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
     }
 
     const { count } = await this.prisma.refreshToken.deleteMany({
@@ -166,7 +185,7 @@ export class TokenService {
     const check = this.verifyRefreshJwt(refreshToken);
     if ('reason' in check) {
       this.securityLog.warn('refresh_invalid', ctx, { reason: check.reason });
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
     }
 
     const stored = await this.prisma.refreshToken.findUnique({
@@ -181,7 +200,7 @@ export class TokenService {
         userId: check.payload.sub,
         reason: 'not_found',
       });
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
     }
 
     if (stored.revokedAt) {
@@ -194,7 +213,7 @@ export class TokenService {
         userId: stored.userId,
       });
       await this.revokeAllForUser(stored.userId);
-      throw new UnauthorizedException('Refresh token reuse detected');
+      throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
     }
 
     if (stored.expiresAt.getTime() <= Date.now()) {
@@ -202,17 +221,24 @@ export class TokenService {
         userId: stored.userId,
         reason: 'expired',
       });
-      throw new UnauthorizedException('Refresh token expired');
+      throw new UnauthorizedException(INVALID_REFRESH_TOKEN_MESSAGE);
     }
 
     return stored;
   }
 
-  /** Não lança: quem chama registra o motivo e responde o 401. */
+  /**
+   * Não lança: quem chama registra o motivo e responde o 401. Algoritmo, `iss`
+   * e `aud` fixados: sem isso o jsonwebtoken aceitaria HS384/HS512 e qualquer
+   * emissor ou audiência.
+   */
   private verifyRefreshJwt(refreshToken: string): RefreshJwtCheck {
     try {
       const payload = this.jwt.verify<RefreshTokenPayload>(refreshToken, {
         secret: this.config.get('JWT_REFRESH_SECRET', { infer: true }),
+        algorithms: [JWT_ALGORITHM],
+        issuer: this.config.get('JWT_ISSUER', { infer: true }),
+        audience: REFRESH_TOKEN_AUDIENCE,
       });
       return { payload };
     } catch (err) {

@@ -4,6 +4,7 @@ import request from 'supertest';
 import type * as FakeGoogleModule from './fakes/fake-google.strategy.js';
 import type { TestApp } from './utils/create-app.js';
 import { createAppWithEnv } from './utils/create-app-with-env.js';
+import { claimsOf, signWithSecretOf } from './utils/jwt.js';
 
 /**
  * Log de eventos de segurança (A-07) contra fluxos reais.
@@ -221,6 +222,82 @@ describe('Log de segurança (e2e)', () => {
       event: 'refresh_invalid',
       level: 'warn',
       reason: 'invalid_jwt',
+    });
+  });
+
+  it('A-18: toda recusa de refresh token recebido devolve a mesma mensagem; o motivo só vai para o log', async () => {
+    const { userId, refreshToken } = await signup();
+    const refresh = (body: object) =>
+      post('/auth/refresh').send(body).expect(401);
+
+    // Rotaciona: o token original vira candidato a reuso, e o novo, apagado
+    // no logout, vira "não encontrado".
+    const rotated = await post('/auth/refresh')
+      .send({ refreshToken })
+      .expect(200);
+    const loggedOut = rotated.body.refreshToken as string;
+    await post('/auth/logout').send({ refreshToken: loggedOut }).expect(204);
+    logs.clear();
+
+    const cases = [
+      {
+        label: 'JWT inválido',
+        token: new JwtService().sign(
+          { sub: userId, jti: 'x' },
+          {
+            ...claimsOf('refresh'),
+            secret: 'outro-segredo-qualquer-com-32-caracteres!',
+            expiresIn: '1d',
+          },
+        ),
+        expected: { event: 'refresh_invalid', reason: 'invalid_jwt' },
+      },
+      {
+        label: 'JWT expirado',
+        token: signWithSecretOf(
+          'refresh',
+          { sub: userId, jti: 'x' },
+          { ...claimsOf('refresh'), expiresIn: -10 },
+        ),
+        expected: { event: 'refresh_invalid', reason: 'expired' },
+      },
+      {
+        label: 'não encontrado',
+        token: loggedOut,
+        expected: { event: 'refresh_invalid', reason: 'not_found', userId },
+      },
+      {
+        label: 'reuso',
+        token: refreshToken,
+        expected: { event: 'refresh_reuse_detected', userId },
+      },
+    ];
+
+    for (const { label, token, expected } of cases) {
+      logs.clear();
+      const res = await refresh({ refreshToken: token });
+      expect(res.body.message, label).toBe('Invalid refresh token');
+
+      const line = expectEvent(logs, { ...expected, level: 'warn' });
+      if (expected.event === 'refresh_reuse_detected') {
+        expect(line.reason, label).toBeUndefined();
+      }
+      // Um evento de recusa por request, sem misturar motivos.
+      expect(
+        logs.events().filter((e) => e.event.startsWith('refresh_')),
+        label,
+      ).toHaveLength(1);
+    }
+
+    // Token ausente continua com mensagem própria.
+    logs.clear();
+    const missing = await refresh({});
+    expect(missing.body.message).toBe('Missing refresh token');
+    expect(missing.body.statusCode).toBe(401);
+    expectEvent(logs, {
+      event: 'refresh_invalid',
+      level: 'warn',
+      reason: 'missing_token',
     });
   });
 

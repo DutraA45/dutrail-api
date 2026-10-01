@@ -6,8 +6,11 @@ import {
   IsNotEmpty,
   IsString,
   IsUrl,
+  Matches,
+  MaxLength,
   Min,
   MinLength,
+  ValidateBy,
   validateSync,
 } from 'class-validator';
 
@@ -15,6 +18,47 @@ export enum NodeEnv {
   Development = 'development',
   Test = 'test',
   Production = 'production',
+}
+
+const TTL_UNIT_SECONDS = { s: 1, m: 60, h: 3600, d: 86_400 } as const;
+
+/**
+ * Inteiro positivo + unidade (s, m, h ou d). Número sem unidade fica de fora
+ * de propósito: o jsonwebtoken (via `ms`) leria "15" como 15 milissegundos.
+ */
+const TTL_PATTERN = /^([1-9]\d*)([smhd])$/;
+
+/** Tetos dos TTLs dos tokens (A-14), com o rótulo usado na mensagem de erro. */
+export const ACCESS_TTL_MAX = { seconds: 3600, label: '1h' } as const;
+export const REFRESH_TTL_MAX = { seconds: 30 * 86_400, label: '30d' } as const;
+
+/** "15m" -> 900. `undefined` se o formato não for o aceito. */
+export function ttlToSeconds(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = TTL_PATTERN.exec(value);
+  if (!match) return undefined;
+  const unit = match[2] as keyof typeof TTL_UNIT_SECONDS;
+  return Number(match[1]) * TTL_UNIT_SECONDS[unit];
+}
+
+/**
+ * TTL no formato estrito e até o teto. A mensagem diz a variável e o motivo,
+ * sem o valor (mesma regra das demais).
+ */
+function IsTtl(max: { seconds: number; label: string }): PropertyDecorator {
+  return ValidateBy({
+    name: 'isTtl',
+    validator: {
+      validate: (value) => {
+        const seconds = ttlToSeconds(value);
+        return seconds !== undefined && seconds <= max.seconds;
+      },
+      defaultMessage: (args) =>
+        ttlToSeconds(args?.value) === undefined
+          ? `${args?.property} deve ser um inteiro positivo seguido de s, m, h ou d (ex.: 15m, 7d); sem unidade, o jsonwebtoken leria o número como milissegundos`
+          : `${args?.property} não pode passar de ${max.label}`,
+    },
+  });
 }
 
 /**
@@ -67,12 +111,19 @@ export class EnvironmentVariables {
   @MinLength(32)
   JWT_REFRESH_SECRET: string;
 
+  // Claim `iss` dos dois tokens, conferida no verify (A-14). Opcional; trocar
+  // o valor invalida todos os tokens já emitidos.
   @IsString()
-  @IsNotEmpty()
+  @Matches(/^\S+$/, {
+    message: 'JWT_ISSUER não pode ser vazio nem conter espaços',
+  })
+  @MaxLength(255, { message: 'JWT_ISSUER pode ter no máximo 255 caracteres' })
+  JWT_ISSUER: string = 'dutrail-api';
+
+  @IsTtl(ACCESS_TTL_MAX)
   JWT_ACCESS_TTL: string = '15m';
 
-  @IsString()
-  @IsNotEmpty()
+  @IsTtl(REFRESH_TTL_MAX)
   JWT_REFRESH_TTL: string = '7d';
 
   @IsString()

@@ -101,7 +101,8 @@ Variáveis principais (todas validadas no boot — ver `src/config/env.validatio
 | `NODE_ENV`                                  | **Obrigatório**, sem default: `development`, `test` ou `production`               |
 | `DATABASE_URL`                              | Connection string do Postgres (Neon ou local)                                     |
 | `JWT_SECRET` / `JWT_REFRESH_SECRET`         | Segredos **diferentes**, ≥ 32 chars (≥ 43 em produção). Gere com o comando abaixo |
-| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`        | Expirações (`15m`, `7d`)                                                          |
+| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL`        | Expirações (`15m`, `7d`): inteiro + `s`/`m`/`h`/`d`, teto de `1h` e `30d`         |
+| `JWT_ISSUER`                                | Opcional, padrão `dutrail-api`: claim `iss` dos tokens                            |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Credenciais OAuth (seção abaixo)                                                  |
 | `GOOGLE_CALLBACK_URL`                       | `http://localhost:3000/auth/google/callback` em dev                               |
 | `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200`       |
@@ -279,6 +280,28 @@ banco. O refresh token é outro JWT (`JWT_REFRESH_SECRET`, com `jti`) cujo
 **SHA-256** fica na tabela `RefreshToken`. Guardar só o hash significa que um
 vazamento do banco não entrega sessões válidas.
 
+**Claims e algoritmo conferidos nos dois tokens.** Ambos são HS256 e levam
+`iss` (`JWT_ISSUER`, padrão `dutrail-api`) e um `aud` próprio do tipo:
+`dutrail-access` ou `dutrail-refresh`. O guard do Bearer e o `/auth/refresh`
+recusam token com outro algoritmo, outro emissor ou a audiência do outro tipo.
+Assim um não passa pelo outro mesmo que algum dia compartilhem segredo. Os
+TTLs são validados no boot: só inteiro + unidade (`"15"` sem unidade seria
+lido como 15 ms pelo jsonwebtoken), com teto de 1h para o access e 30d para
+o refresh.
+
+> **Tokens anteriores a essa mudança (A-14) não valem mais.** Os emitidos
+> antes não têm `iss` nem `aud`, então access tokens recebem 401 no Bearer e
+> refresh tokens recebem 401 `Invalid refresh token` no `/auth/refresh`: todo
+> usuário precisa fazer login de novo uma vez. Aceito por estarmos em
+> pré-produção. O mesmo acontece sempre que `JWT_ISSUER` mudar.
+
+**Mesmo 401 para todo refresh token recusado.** JWT inválido ou expirado,
+token desconhecido, rotação concorrente e reuso respondem igual,
+`Invalid refresh token`, para quem roubou um token não saber, por exemplo, que
+o reuso foi detectado. O motivo vai só para o [log de segurança](#logs-de-segurança).
+Token ausente continua com `Missing refresh token`, porque não revela nada
+sobre um token.
+
 **Rotação + detecção de reuso.** Cada `/auth/refresh` revoga o token recebido
 (compare-and-set atômico, então dois requests concorrentes com o mesmo token
 não geram dois pares) e emite outro. Se um token **já rotacionado** for
@@ -410,8 +433,8 @@ testes.
 | `login_success`           | log             | Login por senha                                                                         | —                                                            |
 | `login_failed`            | warn            | Login recusado (com email mascarado). O cliente recebe sempre o mesmo 401               | `unknown_email`, `no_password` (conta só-Google), `wrong_password` |
 | `refresh_success`         | log             | Rotação do refresh token                                                                | —                                                            |
-| `refresh_invalid`         | warn            | Refresh recusado                                                                        | `missing_token`, `invalid_jwt`, `expired`, `not_found`, `concurrent_rotation` |
-| `refresh_reuse_detected`  | warn            | Token já rotacionado reapresentado: **todas as sessões do usuário foram revogadas**     | —                                                            |
+| `refresh_invalid`         | warn            | Refresh recusado. O cliente recebe sempre `Invalid refresh token` (ou `Missing refresh token` sem token) | `missing_token`, `invalid_jwt`, `expired`, `not_found`, `concurrent_rotation` |
+| `refresh_reuse_detected`  | warn            | Token já rotacionado reapresentado: **todas as sessões do usuário foram revogadas**. O cliente recebe o mesmo `Invalid refresh token` | —                                                            |
 | `logout`                  | log / warn      | Logout (warn só quando o token tem assinatura inválida, caso em que a resposta é 401)   | `no_token`, `not_found`, `invalid_jwt`, `expired`            |
 | `google_link`             | log / warn      | Conta Google vinculada a uma conta local com o mesmo email                              | `verified_account` (log), `unverified_takeover` (warn: senha e sessões descartadas, A-01) |
 | `google_exchange_success` | log             | `POST /auth/google/exchange` entregou tokens                                            | —                                                            |

@@ -1,5 +1,7 @@
 import { Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import request from 'supertest';
+import { TokenService } from '../src/auth/token.service.js';
 import { fakeGoogle, makeGoogleProfile } from './fakes/fake-google.strategy.js';
 import {
   CLIENT_TYPES,
@@ -11,6 +13,7 @@ import {
   type TestClient,
 } from './utils/client.js';
 import { createTestApp, TestApp } from './utils/create-app.js';
+import { claimsOf, signWithSecretOf } from './utils/jwt.js';
 
 const credentials = {
   email: 'ana@example.com',
@@ -120,8 +123,10 @@ describe.each(CLIENT_TYPES)(
         const second = await c.refresh(firstToken).expect(200);
         const secondToken = c.refreshTokenOf(second)!;
 
+        // Mesma mensagem de qualquer token recusado (A-18): quem reapresenta
+        // um token roubado não fica sabendo que o reuso foi detectado.
         const reuse = await c.refreshWith(firstToken).expect(401);
-        expect(reuse.body.message).toBe('Refresh token reuse detected');
+        expect(reuse.body.message).toBe('Invalid refresh token');
 
         await c.refreshWith(secondToken).expect(401);
         expect(
@@ -468,6 +473,90 @@ describe('Rotas independentes do client type (e2e)', () => {
       .get('/me')
       .set('Authorization', `Bearer ${signup.body.refreshToken}`)
       .expect(401);
+  });
+
+  describe('claims do JWT (A-14)', () => {
+    async function signupUserId(): Promise<string> {
+      const res = await mobile()
+        .post('/auth/signup')
+        .send(credentials)
+        .expect(201);
+      return res.body.user.id as string;
+    }
+
+    const bearer = (token: string) =>
+      http().get('/me').set('Authorization', `Bearer ${token}`);
+
+    it.each([
+      ['aud de refresh token', claimsOf('refresh')],
+      ['outro emissor', { ...claimsOf('access'), issuer: 'outro-servico' }],
+      ['sem iss nem aud (formato anterior ao A-14)', {}],
+    ])(
+      'GET /me recusa access token com o segredo certo mas %s',
+      async (_label, claims) => {
+        const payload = { sub: await signupUserId(), email: credentials.email };
+
+        // Controle: o mesmo payload com as claims atuais é aceito, então o
+        // 401 abaixo vem da claim, e não de um token mal forjado.
+        await bearer(
+          signWithSecretOf('access', payload, claimsOf('access')),
+        ).expect(200);
+        await bearer(signWithSecretOf('access', payload, claims)).expect(401);
+      },
+    );
+
+    /**
+     * O token forjado é gravado no banco como se a API o tivesse emitido:
+     * sem isso o 401 viria do "não encontrado", e o teste passaria mesmo sem
+     * a checagem das claims.
+     */
+    async function storedRefreshToken(
+      userId: string,
+      options: Parameters<typeof signWithSecretOf>[2],
+    ): Promise<string> {
+      const token = signWithSecretOf(
+        'refresh',
+        { sub: userId, jti: randomUUID() },
+        options,
+      );
+      await t.prisma.refreshToken.create({
+        data: {
+          tokenHash: TokenService.hashToken(token),
+          userId,
+          expiresAt: new Date(Date.now() + 86_400_000),
+        },
+      });
+      return token;
+    }
+
+    it.each([
+      ['aud de access token', claimsOf('access')],
+      [
+        'assinatura HS384',
+        { ...claimsOf('refresh'), algorithm: 'HS384' as const },
+      ],
+      ['sem iss nem aud (formato anterior ao A-14)', {}],
+    ])(
+      'POST /auth/refresh recusa token com o segredo de refresh mas %s',
+      async (_label, options) => {
+        const userId = await signupUserId();
+        const c = mobile();
+
+        // Controle: token forjado com as claims atuais e gravado é aceito.
+        const valid = await storedRefreshToken(userId, claimsOf('refresh'));
+        await c.refreshWith(valid).expect(200);
+
+        const token = await storedRefreshToken(userId, options);
+        const res = await c.refreshWith(token).expect(401);
+        expect(res.body.message).toBe('Invalid refresh token');
+        // Recusado já na verificação do JWT: continua gravado e não revogado.
+        expect(
+          await t.prisma.refreshToken.findUnique({
+            where: { tokenHash: TokenService.hashToken(token) },
+          }),
+        ).toMatchObject({ revokedAt: null });
+      },
+    );
   });
 
   it('retorna 409 para email já cadastrado', async () => {

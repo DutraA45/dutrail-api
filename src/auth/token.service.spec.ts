@@ -6,14 +6,43 @@ import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { SecurityContext } from '../security/security-context.js';
 import { SecurityLogService } from '../security/security-log.service.js';
+import {
+  ACCESS_TOKEN_AUDIENCE,
+  INVALID_REFRESH_TOKEN_MESSAGE,
+  REFRESH_TOKEN_AUDIENCE,
+} from './jwt.constants.js';
 import { TokenService } from './token.service.js';
 
 const env = {
   JWT_SECRET: 'access-secret-0000000000000000000000000000000000',
   JWT_REFRESH_SECRET: 'refresh-secret-000000000000000000000000000000000',
+  JWT_ISSUER: 'dutrail-api',
   JWT_ACCESS_TTL: '15m',
   JWT_REFRESH_TTL: '7d',
 };
+
+/** Claims que o TokenService põe e confere no refresh token. */
+const refreshClaims = {
+  issuer: env.JWT_ISSUER,
+  audience: REFRESH_TOKEN_AUDIENCE,
+};
+
+/**
+ * Toda recusa de refresh token recebido sai com a mesma mensagem (A-18):
+ * `toThrow(string)` aceitaria substring, então a comparação é exata.
+ */
+async function expectInvalidRefresh(promise: Promise<unknown>): Promise<void> {
+  const err = await promise.then(
+    () => {
+      throw new Error('esperava 401');
+    },
+    (e: unknown) => e,
+  );
+  expect(err).toBeInstanceOf(UnauthorizedException);
+  expect((err as UnauthorizedException).message).toBe(
+    INVALID_REFRESH_TOKEN_MESSAGE,
+  );
+}
 
 const user = { id: 'user-1', email: 'ana@example.com' };
 const ctx: SecurityContext = { ip: '203.0.113.7', clientType: 'mobile' };
@@ -58,6 +87,27 @@ describe('TokenService', () => {
   });
 
   describe('issueTokenPair', () => {
+    it('emite access e refresh com HS256, iss e aud próprios de cada tipo', async () => {
+      prisma.refreshToken.create.mockResolvedValue({});
+
+      const { accessToken, refreshToken } = await service.issueTokenPair(user);
+
+      const access = jwt.decode<Record<string, unknown>>(accessToken, {
+        complete: true,
+      });
+      expect(access).toMatchObject({
+        header: { alg: 'HS256' },
+        payload: { iss: 'dutrail-api', aud: ACCESS_TOKEN_AUDIENCE },
+      });
+      const refresh = jwt.decode<Record<string, unknown>>(refreshToken, {
+        complete: true,
+      });
+      expect(refresh).toMatchObject({
+        header: { alg: 'HS256' },
+        payload: { iss: 'dutrail-api', aud: REFRESH_TOKEN_AUDIENCE },
+      });
+    });
+
     it('emite access e refresh assinados com segredos diferentes', async () => {
       prisma.refreshToken.create.mockResolvedValue({});
 
@@ -150,12 +200,10 @@ describe('TokenService', () => {
     it('rejeita token com assinatura inválida sem consultar o banco', async () => {
       const forged = jwt.sign(
         { sub: user.id, jti: 'x' },
-        { secret: 'outro-segredo', expiresIn: '1d' },
+        { secret: 'outro-segredo', expiresIn: '1d', ...refreshClaims },
       );
 
-      await expect(
-        service.rotateRefreshToken(forged, ctx),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
+      await expectInvalidRefresh(service.rotateRefreshToken(forged, ctx));
       expect(prisma.refreshToken.findUnique).not.toHaveBeenCalled();
       expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
         reason: 'invalid_jwt',
@@ -165,12 +213,10 @@ describe('TokenService', () => {
     it('JWT expirado: 401 com reason "expired" no log', async () => {
       const expired = jwt.sign(
         { sub: user.id, jti: 'x', exp: Math.floor(Date.now() / 1000) - 10 },
-        { secret: env.JWT_REFRESH_SECRET },
+        { secret: env.JWT_REFRESH_SECRET, ...refreshClaims },
       );
 
-      await expect(
-        service.rotateRefreshToken(expired, ctx),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
+      await expectInvalidRefresh(service.rotateRefreshToken(expired, ctx));
       expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
         reason: 'expired',
       });
@@ -181,18 +227,39 @@ describe('TokenService', () => {
         { sub: user.id, email: user.email },
         { secret: env.JWT_SECRET, expiresIn: '15m' },
       );
-      await expect(
-        service.rotateRefreshToken(wrongKind, ctx),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
+      await expectInvalidRefresh(service.rotateRefreshToken(wrongKind, ctx));
     });
+
+    it.each([
+      [
+        'aud de access token',
+        { ...refreshClaims, audience: ACCESS_TOKEN_AUDIENCE },
+      ],
+      ['sem aud', { issuer: env.JWT_ISSUER }],
+      ['outro iss', { ...refreshClaims, issuer: 'outro-servico' }],
+      ['sem iss nem aud (formato anterior ao A-14)', {}],
+      ['algoritmo HS384', { ...refreshClaims, algorithm: 'HS384' as const }],
+    ])(
+      'rejeita token com o segredo certo mas %s, sem consultar o banco',
+      async (_label, claims) => {
+        const token = jwt.sign(
+          { sub: user.id, jti: 'x' },
+          { secret: env.JWT_REFRESH_SECRET, expiresIn: '1d', ...claims },
+        );
+
+        await expectInvalidRefresh(service.rotateRefreshToken(token, ctx));
+        expect(prisma.refreshToken.findUnique).not.toHaveBeenCalled();
+        expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
+          reason: 'invalid_jwt',
+        });
+      },
+    );
 
     it('rejeita token válido mas desconhecido no banco', async () => {
       const { refreshToken } = await issue();
       prisma.refreshToken.findUnique.mockResolvedValue(null);
 
-      await expect(
-        service.rotateRefreshToken(refreshToken, ctx),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
+      await expectInvalidRefresh(service.rotateRefreshToken(refreshToken, ctx));
       expect(prisma.refreshToken.updateMany).not.toHaveBeenCalled();
       expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
         userId: user.id,
@@ -211,9 +278,8 @@ describe('TokenService', () => {
       });
       prisma.refreshToken.updateMany.mockResolvedValue({ count: 3 });
 
-      await expect(
-        service.rotateRefreshToken(refreshToken, ctx),
-      ).rejects.toThrow('reuse');
+      // A resposta não revela que o reuso foi detectado; só o log sabe.
+      await expectInvalidRefresh(service.rotateRefreshToken(refreshToken, ctx));
       expect(prisma.refreshToken.updateMany).toHaveBeenCalledWith({
         where: { userId: user.id, revokedAt: null },
         data: { revokedAt: expect.any(Date) },
@@ -236,9 +302,7 @@ describe('TokenService', () => {
         user,
       });
 
-      await expect(
-        service.rotateRefreshToken(refreshToken, ctx),
-      ).rejects.toThrow('expired');
+      await expectInvalidRefresh(service.rotateRefreshToken(refreshToken, ctx));
       expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
         userId: user.id,
         reason: 'expired',
@@ -257,9 +321,7 @@ describe('TokenService', () => {
       // Outro request revogou entre o findUnique e o updateMany.
       prisma.refreshToken.updateMany.mockResolvedValue({ count: 0 });
 
-      await expect(
-        service.rotateRefreshToken(refreshToken, ctx),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
+      await expectInvalidRefresh(service.rotateRefreshToken(refreshToken, ctx));
       expect(prisma.refreshToken.create).not.toHaveBeenCalled();
       expect(securityLog.warn).toHaveBeenCalledWith('refresh_invalid', ctx, {
         userId: user.id,
