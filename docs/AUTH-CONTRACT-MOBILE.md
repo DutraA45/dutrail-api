@@ -19,7 +19,9 @@ As rotas de atividades (`/activities`) estão em
 (Bearer, formato de erro, interceptor) valem para elas também.
 
 O **access token** vai no corpo JSON e volta em
-`Authorization: Bearer <accessToken>`. O **refresh token** também trafega no
+`Authorization: Bearer <accessToken>`. Trate-o como opaco: o payload só tem o
+id do usuário (`sub`) e claims técnicas, **sem email**. Os dados do usuário
+vêm do `user` da resposta ou de `GET /me`. O **refresh token** também trafega no
 corpo JSON: o app o recebe no corpo e o envia no corpo.
 
 Base em desenvolvimento: `http://localhost:3000`.
@@ -138,6 +140,21 @@ outros aparelhos e no web **não** são afetadas. Contam como reuso:
 A validação rejeita campos desconhecidos: enviar `name` em `/auth/login`
 retorna **400**, não é ignorado. `email` é normalizado no servidor (trim +
 minúsculas); `password` tem entre 8 e 128 caracteres no cadastro.
+
+A senha é normalizada em **NFKC** no servidor, no cadastro e no login: senhas
+equivalentes em Unicode entram igual ("é" pré-composto ou "e" + acento
+combinante, "ｐａｓｓ" de largura total ou "pass"). Não normalize no cliente:
+envie o que a pessoa digitou. O limite de 128 caracteres vale também depois
+da normalização, que pode expandir alguns caracteres (ex.: "㍿" vira 4); se
+passar, o cadastro responde **400** com
+`password must be shorter than or equal to 128 characters after Unicode normalization (NFKC)`.
+
+No cadastro, a senha também é conferida numa lista de **senhas vazadas**
+(Have I Been Pwned). Se aparecer lá, o cadastro responde **400** com
+`password has appeared in a known data breach; choose a different one`, e o
+formulário deve pedir outra senha. O mínimo continua 8 caracteres. Se a lista
+estiver fora do ar, o cadastro segue normalmente. O login não faz essa
+checagem: uma senha que vazou depois do cadastro continua entrando.
 
 ### Exemplos
 

@@ -112,6 +112,8 @@ Variáveis principais (todas validadas no boot — ver `src/config/env.validatio
 | `FRONTEND_URL`                              | Origem do Angular (CORS + redirect pós-Google), ex. `http://localhost:4200`       |
 | `COOKIE_SECURE`                             | Flag `Secure` do cookie do refresh (padrão `true`); `false` recusado em produção  |
 | `SECURITY_LOG_ENABLED`                      | Log de eventos de segurança (padrão `true`; `false` no `.env.test`)               |
+| `BREACHED_PASSWORD_CHECK`                   | Checagem de senha vazada no cadastro, no HIBP (padrão `true`; `false` no `.env.test`) |
+| `BREACHED_PASSWORD_TIMEOUT_MS`              | Prazo da consulta ao HIBP (padrão `2000`, de `100` a `10000`); estourou, o cadastro segue |
 | `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                        |
 | `OCI_S3_ENDPOINT`                           | Endpoint S3-compatível do Object Storage (seção abaixo)                           |
 | `OCI_S3_REGION`                             | Região do bucket, ex. `sa-saopaulo-1`                                             |
@@ -286,6 +288,12 @@ tolerância (resposta perdida, requests concorrentes, terceiro uso, fim da
 janela simulado recuando o `rotatedAt`) e o rollback da rotação, e
 `test/migrations.e2e-spec.ts` aplica as migrations num schema descartável e
 confere o backfill do `familyId` sobre linhas criadas antes dele.
+`test/password-normalization.e2e-spec.ts` cobre as senhas equivalentes em
+NFKC, o rehash de um hash legado, o teto depois da normalização, o mesmo 401
+(e o mesmo número de argon2) para email inexistente e senha errada, e o
+access token sem email. `test/breached-password.e2e-spec.ts` cobre a senha
+vazada no cadastro (com o fake), a API indisponível, o login sem checagem e,
+com o `fetch` simulado, o service real ligado e desligado pelo env.
 O storage dos `.fit` também é um fake em memória, o que permite simular falha
 do provedor. O fixture `test/fixtures/running.fit` é sintético, gerado pelo
 Encoder da Garmin, e não contém GPS. Para regenerá-lo, rode
@@ -315,6 +323,13 @@ Assim um não passa pelo outro mesmo que algum dia compartilhem segredo. Os
 TTLs são validados no boot: só inteiro + unidade (`"15"` sem unidade seria
 lido como 15 ms pelo jsonwebtoken), com teto de 1h para o access e 30d para
 o refresh.
+
+**Access token sem email (A-21).** O payload do access token leva só o id do
+usuário (`sub`), além de `iss`, `aud`, `iat` e `exp`: é só base64, e tokens
+acabam em logs de proxies e ferramentas de terceiros. Nada no backend lia o
+email do token (`req.user` é só `{ userId }`); quem precisar dele busca no
+banco. Access tokens emitidos antes, ainda com `email`, continuam válidos até
+expirar: a claim a mais é ignorada.
 
 > **Tokens anteriores a essa mudança (A-14) não valem mais.** Os emitidos
 > antes não têm `iss` nem `aud`, então access tokens recebem 401 no Bearer e
@@ -505,6 +520,32 @@ senha (ver Próximos passos).
 email não existe, ainda verificamos contra um hash "dummy" para a resposta
 demorar o mesmo tempo e não revelar por timing quais emails estão cadastrados.
 
+A senha é normalizada em **NFKC** antes do hash e da verificação (A-09):
+senhas equivalentes em Unicode entram igual ("é" pré-composto ou "e" + acento
+combinante, "ｐａｓｓ" de largura total ou "pass"), então quem cadastra num
+teclado e digita em outro não fica de fora. O teto de 128 caracteres vale
+também depois da normalização (400 no cadastro). Hashes anteriores, gerados
+da senha bruta, continuam entrando: se a forma normalizada não confere e é
+diferente da bruta, o login verifica a bruta e, se ela confere, troca o hash
+pelo da forma normalizada (rehash transparente, com compare-and-set no hash
+antigo). O hash dummy passa pela mesma verificação, então email inexistente
+e senha errada seguem com o mesmo custo.
+
+**Senhas vazadas.** O mínimo continua em 8 caracteres, e o cadastro recusa
+(400) senhas que aparecem no [Pwned Passwords](https://haveibeenpwned.com/Passwords)
+do Have I Been Pwned (ASVS 2.1.7). A consulta usa k-anonymity: só os 5
+primeiros caracteres hex do SHA-1 da senha (na forma NFKC) vão para
+`api.pwnedpasswords.com/range/`, a comparação com os sufixos devolvidos é
+local, e o header `Add-Padding` faz o tamanho da resposta não revelar nada.
+O servidor precisa de HTTPS de saída para esse host. É a última checagem do
+cadastro (depois do 409), porque é a única que vai à rede. Se a API não
+responder em `BREACHED_PASSWORD_TIMEOUT_MS` ou responder com erro, o cadastro
+**segue** (fail-open): a queda de um serviço de terceiros não derruba o
+cadastro, e fica um `breach_check_unavailable` no log. O login não consulta a
+lista. Um fluxo futuro de troca ou reset de senha deve chamar a mesma
+checagem. Nos testes, nada vai à rede: o `.env.test` desliga a checagem e o
+e2e usa um fake (`test/fakes/fake-breached-password.service.ts`).
+
 **Outros.** Guard JWT global com opt-out explícito via `@Public()`; algoritmo
 JWT fixado em HS256; `ValidationPipe` com `whitelist` + `forbidNonWhitelisted`;
 rate limit global e mais estrito em `/auth/login` e `/auth/signup` (10/min
@@ -559,6 +600,8 @@ testes.
 | Evento                    | Nível           | Quando                                                                                  | `reason`                                                     |
 | ------------------------- | --------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | `signup`                  | log             | Cadastro concluído (com email mascarado)                                                | —                                                            |
+| `signup_rejected`         | warn            | Cadastro recusado por senha vazada (com email mascarado)                                | `breached_password`                                          |
+| `breach_check_unavailable` | warn           | A API de senhas vazadas não respondeu no prazo ou respondeu com erro; o cadastro seguiu | `timeout`, `check_error`                                     |
 | `login_success`           | log             | Login por senha                                                                         | —                                                            |
 | `login_failed`            | warn            | Login recusado (com email mascarado). O cliente recebe sempre o mesmo 401               | `unknown_email`, `no_password` (conta só-Google), `wrong_password` |
 | `refresh_success`         | log             | Rotação do refresh token (com `familyId`)                                               | —                                                            |

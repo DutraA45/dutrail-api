@@ -93,7 +93,7 @@ export class AuthController {
   @ApiOperation({ summary: 'Cadastro com email e senha' })
   @ApiAuthResponse(HttpStatus.CREATED)
   @ApiBadRequestResponse({
-    description: CLIENT_TYPE_ERROR,
+    description: `${CLIENT_TYPE_ERROR}, senha acima de 128 caracteres depois do NFKC, ou senha presente em vazamentos conhecidos`,
     type: ErrorResponseDto,
   })
   @ApiConflictResponse({

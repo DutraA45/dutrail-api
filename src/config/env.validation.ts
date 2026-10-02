@@ -7,6 +7,7 @@ import {
   IsString,
   IsUrl,
   Matches,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -178,6 +179,20 @@ export class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   OCI_S3_SECRET_KEY: string;
+
+  // Checagem de senha vazada no cadastro (A-09), na API do Have I Been Pwned
+  // por k-anonymity. Ligada por padrão; desligar só serve para rodar sem
+  // acesso à internet. Se a API não responder no prazo, o cadastro segue.
+  @Transform(({ obj, key }) => parseBooleanFlag(obj[key]))
+  @IsBoolean({ message: 'BREACHED_PASSWORD_CHECK deve ser "true" ou "false"' })
+  BREACHED_PASSWORD_CHECK: boolean = true;
+
+  @IsInt({ message: 'BREACHED_PASSWORD_TIMEOUT_MS deve ser um inteiro' })
+  @Min(100, { message: 'BREACHED_PASSWORD_TIMEOUT_MS deve ser de 100 a 10000' })
+  @Max(10_000, {
+    message: 'BREACHED_PASSWORD_TIMEOUT_MS deve ser de 100 a 10000',
+  })
+  BREACHED_PASSWORD_TIMEOUT_MS: number = 2000;
 
   @IsInt()
   @Min(1)

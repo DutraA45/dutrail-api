@@ -5,6 +5,8 @@ import type { SecurityContext } from './security-context.js';
 
 export const SECURITY_EVENTS = [
   'signup',
+  'signup_rejected',
+  'breach_check_unavailable',
   'login_success',
   'login_failed',
   'refresh_success',
@@ -46,7 +48,13 @@ export type SecurityReason =
   | 'state_mismatch'
   | 'access_denied'
   | 'email_not_verified'
-  | 'callback_error';
+  | 'callback_error'
+  // signup_rejected (A-09)
+  | 'breached_password'
+  // breach_check_unavailable (A-09): a API de senhas vazadas não respondeu
+  // no prazo, ou respondeu algo inesperado; o cadastro seguiu
+  | 'timeout'
+  | 'check_error';
 
 export interface SecurityEventDetails {
   userId?: string;

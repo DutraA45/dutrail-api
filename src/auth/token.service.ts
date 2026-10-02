@@ -29,12 +29,6 @@ export interface TokenPair {
 type RefreshJwtCheck =
   { payload: RefreshTokenPayload } | { reason: 'invalid_jwt' | 'expired' };
 
-/** O que a rotação precisa da linha: o token e o usuário (para o par novo). */
-const WITH_USER = { user: { select: { id: true, email: true } } } as const;
-type StoredRefreshToken = RefreshToken & {
-  user: { id: string; email: string };
-};
-
 /** Linha a gravar para um refresh token recém-assinado. */
 function refreshTokenRow(
   pair: TokenPair,
@@ -90,11 +84,8 @@ export class TokenService {
    * Gera access + refresh e persiste o hash do refresh numa família nova: é
    * o começo de uma sessão (login, signup, troca do código do Google).
    */
-  async issueTokenPair(user: {
-    id: string;
-    email: string;
-  }): Promise<TokenPair> {
-    const signed = await this.signTokenPair(user);
+  async issueTokenPair(user: { id: string }): Promise<TokenPair> {
+    const signed = await this.signTokenPair(user.id);
     await this.prisma.refreshToken.create({
       data: refreshTokenRow(signed, user.id, randomUUID()),
     });
@@ -120,7 +111,7 @@ export class TokenService {
 
     // A-17: CAS, sucessor e ligação numa transação só. Se qualquer passo
     // falhar, o token atual continua ativo e o cliente pode tentar de novo.
-    const signed = await this.signTokenPair(stored.user);
+    const signed = await this.signTokenPair(stored.userId);
     const rotated = await this.prisma.$transaction(async (tx) => {
       // Compare-and-set: só quem conseguir marcar `revokedAt` (de null para
       // agora) emite o sucessor.
@@ -148,7 +139,6 @@ export class TokenService {
       // é uma reapresentação como outra qualquer.
       const current = await this.prisma.refreshToken.findUnique({
         where: { id: stored.id },
-        include: WITH_USER,
       });
       if (!current) {
         // Apagada nesse meio-tempo (logout, ou reuso detectado na família).
@@ -215,7 +205,7 @@ export class TokenService {
    * a própria linha.
    */
   private async handleRotatedToken(
-    stored: StoredRefreshToken,
+    stored: RefreshToken,
     ctx: SecurityContext,
   ): Promise<TokenPair> {
     const details = { userId: stored.userId, familyId: stored.familyId };
@@ -277,9 +267,9 @@ export class TokenService {
    * (ou a linha sumiu) — quem chama trata como reuso.
    */
   private async issueGracePair(
-    stored: StoredRefreshToken,
+    stored: RefreshToken,
   ): Promise<TokenPair | undefined> {
-    const signed = await this.signTokenPair(stored.user);
+    const signed = await this.signTokenPair(stored.userId);
     const granted = await this.prisma.$transaction(async (tx) => {
       const { count } = await tx.refreshToken.updateMany({
         where: { id: stored.id, graceUsedAt: null },
@@ -296,14 +286,8 @@ export class TokenService {
   }
 
   /** Assina access + refresh; quem chama decide onde persistir o refresh. */
-  private async signTokenPair(user: {
-    id: string;
-    email: string;
-  }): Promise<TokenPair> {
-    const accessPayload: AccessTokenPayload = {
-      sub: user.id,
-      email: user.email,
-    };
+  private async signTokenPair(userId: string): Promise<TokenPair> {
+    const accessPayload: AccessTokenPayload = { sub: userId };
     const accessToken = await this.jwt.signAsync(accessPayload, {
       secret: this.config.get('JWT_SECRET', { infer: true }),
       expiresIn: this.config.get('JWT_ACCESS_TTL', { infer: true }),
@@ -313,7 +297,7 @@ export class TokenService {
     });
 
     const refreshPayload: RefreshTokenPayload = {
-      sub: user.id,
+      sub: userId,
       jti: randomUUID(),
     };
     const refreshToken = await this.jwt.signAsync(refreshPayload, {
@@ -341,7 +325,7 @@ export class TokenService {
   private async findRefreshToken(
     refreshToken: string,
     ctx: SecurityContext,
-  ): Promise<StoredRefreshToken> {
+  ): Promise<RefreshToken> {
     const check = this.verifyRefreshJwt(refreshToken);
     if ('reason' in check) {
       this.securityLog.warn('refresh_invalid', ctx, { reason: check.reason });
@@ -350,7 +334,6 @@ export class TokenService {
 
     const stored = await this.prisma.refreshToken.findUnique({
       where: { tokenHash: TokenService.hashToken(refreshToken) },
-      include: WITH_USER,
     });
 
     if (!stored) {
