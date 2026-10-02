@@ -11,6 +11,7 @@ import { UsersService } from '../users/users.service.js';
 import type { User } from '../generated/prisma/client.js';
 import { GoogleEmailNotVerifiedException } from './google-callback.js';
 import type { GoogleProfile } from './interfaces/google-profile.interface.js';
+import { LoginAttemptsService } from './login-attempts.service.js';
 import { PasswordService } from './password.service.js';
 import { TokenService, type TokenPair } from './token.service.js';
 
@@ -40,6 +41,7 @@ export class AuthService {
     private readonly tokenService: TokenService,
     private readonly prisma: PrismaService,
     private readonly securityLog: SecurityLogService,
+    private readonly loginAttempts: LoginAttemptsService,
   ) {}
 
   async signup(
@@ -52,7 +54,12 @@ export class AuthService {
     if (existing) {
       // 409 explícito. Trade-off: revela que o email existe, mas o fluxo de
       // cadastro precisa disso para ser utilizável (o alternativo — "enviamos
-      // um email" — exige infra de email, fora do escopo desta etapa).
+      // um email" — exige infra de email, fora do escopo desta etapa). Por
+      // isso fica no log: muitos 409 seguidos são enumeração de contas.
+      this.securityLog.warn('signup_conflict', ctx, {
+        userId: existing.id,
+        email,
+      });
       throw new ConflictException('Email already registered');
     }
 
@@ -68,6 +75,10 @@ export class AuthService {
     password: string,
     ctx: SecurityContext,
   ): Promise<AuthResult> {
+    // Limite por conta (A-03): conta a tentativa antes de qualquer consulta,
+    // exista ou não a conta, e responde 429 se o limite já foi atingido.
+    await this.loginAttempts.consume(email);
+
     const user = await this.usersService.findByEmail(email);
 
     // Conta inexistente OU conta só-Google (sem senha): mesma resposta.
@@ -76,6 +87,7 @@ export class AuthService {
 
     if (!user || !user.passwordHash || !passwordOk) {
       // O motivo distingue os casos só no log; o cliente recebe o mesmo 401.
+      // A tentativa já contada fica valendo como falha.
       this.securityLog.warn('login_failed', ctx, {
         userId: user?.id,
         email,
@@ -88,6 +100,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    await this.loginAttempts.succeeded(email);
     const tokens = await this.tokenService.issueTokenPair(user);
     this.securityLog.log('login_success', ctx, { userId: user.id });
     return { ...tokens, user };
@@ -99,6 +112,34 @@ export class AuthService {
 
   logout(refreshToken: string, ctx: SecurityContext): Promise<void> {
     return this.tokenService.revokeRefreshToken(refreshToken, ctx);
+  }
+
+  /**
+   * "Sair de todos os dispositivos" (A-08): apaga, numa transação, todos os
+   * refresh tokens do usuário (todas as famílias) e os códigos de troca do
+   * Google pendentes. Idempotente: sem sessões, não há o que apagar.
+   *
+   * Apagar, e não marcar `revokedAt`, pelo mesmo motivo do logout e do A-01:
+   * uma linha só marcada ainda passaria pela janela de tolerância (e ganharia
+   * um par novo) ou pela detecção de reuso. Apagada, qualquer token
+   * reapresentado é "não encontrado" (401 simples).
+   *
+   * Os access tokens já emitidos continuam válidos até expirar (stateless).
+   */
+  async logoutAll(userId: string, ctx: SecurityContext): Promise<void> {
+    const sessionsRemoved = await this.prisma.$transaction(async (tx) => {
+      // Contadas antes do DELETE, só para o log: um login concorrente pode
+      // ser apagado sem entrar na contagem.
+      const families = await tx.refreshToken.findMany({
+        where: { userId },
+        distinct: ['familyId'],
+        select: { familyId: true },
+      });
+      await tx.refreshToken.deleteMany({ where: { userId } });
+      await tx.oAuthExchangeCode.deleteMany({ where: { userId } });
+      return families.length;
+    });
+    this.securityLog.log('logout_all', ctx, { userId, sessionsRemoved });
   }
 
   /**

@@ -1,11 +1,16 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConditionalModule, ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ActivitiesModule } from './activities/activities.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter.js';
-import { EnvironmentVariables, validateEnv } from './config/env.validation.js';
+import {
+  EnvironmentVariables,
+  schedulerEnabled,
+  validateEnv,
+} from './config/env.validation.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { SecurityLogModule } from './security/security-log.module.js';
 import { UsersModule } from './users/users.module.js';
@@ -32,6 +37,12 @@ import { UsersModule } from './users/users.module.js';
           },
         ],
       }),
+    }),
+    // Jobs agendados (@Cron), como a limpeza de tokens expirados (A-12). Com
+    // SCHEDULER_ENABLED=false o módulo nem é importado: nenhum job é
+    // registrado. O ConditionalModule espera o ConfigModule carregar os .env.
+    ConditionalModule.registerWhen(ScheduleModule.forRoot(), schedulerEnabled, {
+      debug: false,
     }),
     PrismaModule,
     // Para o AllExceptionsFilter (429 e falhas do callback do Google).

@@ -29,7 +29,7 @@ origem em `FRONTEND_URL` (`http://localhost:4200`), com `credentials: true`.
 ## X-Client-Type é obrigatório
 
 Nas rotas que emitem ou leem o refresh token (`/auth/signup`, `/auth/login`,
-`/auth/refresh`, `/auth/logout`, `/auth/google/exchange`):
+`/auth/refresh`, `/auth/logout`, `/auth/logout-all`, `/auth/google/exchange`):
 
 | Header                             | Resposta                                               |
 | ---------------------------------- | ------------------------------------------------------ |
@@ -52,6 +52,7 @@ de browser, que não permite headers customizados).
 | Enviar o refresh token         | Automático (cookie); corpo deve ficar **vazio**                                                 | `{ "refreshToken": "eyJ..." }` no corpo                                                              |
 | Token no canal errado          | Corpo preenchido → **400**                                                                      | Cookie `refreshToken` presente → **400**                                                             |
 | Logout                         | Revoga no banco + apaga o cookie (`Set-Cookie: refreshToken=; Expires=1970`)                    | Revoga no banco                                                                                      |
+| Logout de todos os dispositivos | Bearer; encerra todas as sessões + apaga o cookie deste browser                                | Bearer; encerra todas as sessões                                                                     |
 | Onde o cliente guarda          | Em nenhum lugar — o cookie é `httpOnly`                                                         | Armazenamento seguro do Android (Android Keystore protegendo os tokens, ex. DataStore criptografado) |
 
 Rotação, detecção de reuso e revogação são **idênticas** nos dois: só o
@@ -92,7 +93,8 @@ cada chamada bem-sucedida a `/auth/refresh` emite um refresh token novo com a
 validade completa contada a partir daquele momento, e não herda o prazo do login
 original. Não há limite absoluto de duração da sessão: ela só expira se o
 cliente passar um período inteiro de `JWT_REFRESH_TTL` sem renovar, ou se for
-encerrada (logout, ou detecção de reuso naquela sessão). Por isso o cliente não
+encerrada (logout, logout de todos os dispositivos, ou detecção de reuso naquela
+sessão). Por isso o cliente não
 precisa agendar renovação: basta renovar ao receber 401 (ver
 [Interceptor](#interceptor)).
 
@@ -147,6 +149,7 @@ em produção.
 | POST   | `/auth/login`           | obrigatório     | `email`, `password`                   | 200     | access (+ refresh se mobile) + `user`      |
 | POST   | `/auth/refresh`         | obrigatório     | vazio (web) / `refreshToken` (mobile) | 200     | access (+ refresh se mobile)               |
 | POST   | `/auth/logout`          | obrigatório     | vazio (web) / `refreshToken` (mobile) | 204     | corpo vazio                                |
+| POST   | `/auth/logout-all`      | obrigatório     | vazio (Bearer)                        | 204     | corpo vazio                                |
 | GET    | `/auth/google`          | —               | —                                     | 302     | redirect para o Google (+ cookie de state) |
 | POST   | `/auth/google/exchange` | obrigatório     | `code`                                | 200     | access (+ refresh se mobile) + `user`      |
 | GET    | `/me`                   | —               | — (Bearer)                            | 200     | apenas `user`                              |
@@ -214,6 +217,40 @@ HTTP/1.1 200 OK
 `GET /me` devolve o objeto `user` na raiz, sem envelope, e não muda entre os
 fluxos.
 
+### Sair de todos os dispositivos
+
+`POST /auth/logout-all` encerra **todas** as sessões do usuário: as do web
+(todos os browsers) e as do app, inclusive a do próprio cliente que chamou. É
+o "sair de todos os dispositivos" para um celular perdido ou roubado.
+
+- Autentica pelo **access token** (`Authorization: Bearer`), não pelo refresh
+  token. O corpo fica vazio; o cookie, se for junto, é ignorado.
+- Exige `X-Client-Type` como as demais rotas de token. No `web`, a resposta
+  também apaga o cookie deste browser (mesmo `Set-Cookie` do logout).
+- Os **outros dispositivos** continuam com o access token que já tinham até
+  ele expirar; no próximo `/auth/refresh` recebem 401 `Invalid refresh token`
+  e vão para o login.
+- O **access token atual continua válido até expirar** (é stateless, até
+  `JWT_ACCESS_TTL`). Por isso o cliente deve descartá-lo e limpar o estado
+  local logo após a resposta, como no logout.
+- Idempotente: sem sessões abertas, responde 204 do mesmo jeito.
+- Rate limit próprio: 20 req/min por IP.
+
+```http
+POST /auth/logout-all
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
+X-Client-Type: web
+Cookie: refreshToken=eyJhbGciOi...        ← vai junto (Path=/auth), mas é ignorado
+
+HTTP/1.1 204 No Content
+Set-Cookie: refreshToken=; Path=/auth; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax
+```
+
+| Situação                                      | Código | `message`                             |
+| --------------------------------------------- | ------ | ------------------------------------- |
+| Sem Bearer, ou access token inválido/expirado | 401    | `Unauthorized`                        |
+| Sem `X-Client-Type`                           | 400    | `x-client-type header is required...` |
+
 ## Erros
 
 Todo erro sai neste formato (filtro global):
@@ -236,7 +273,7 @@ Todo erro sai neste formato (filtro global):
 | 401    | Credenciais erradas, email inexistente, conta só-Google, access token ausente/inválido/expirado, refresh token ausente/inválido/expirado/revogado, código de troca inválido | Em request comum, tenta refresh; em `/auth/refresh`, faz logout local |
 | 404    | Token válido de um usuário que foi apagado                                                                                                                                  | Limpa a sessão local                                                  |
 | 409    | `POST /auth/signup` com email já cadastrado; `POST /activities/import` com arquivo já importado                                                                             | Mostra "email já em uso" (signup) ou "já importada" (importação)      |
-| 429    | Rate limit: 10 req/min por IP em `/auth/login` e `/auth/signup`; 20 em `POST /activities/import`; 100 no resto                                                              | Mostra "muitas tentativas, aguarde"                                   |
+| 429    | Rate limit por IP: 10 req/min em `/auth/login` e `/auth/signup`; 30 em `/auth/refresh` e `/auth/logout`; 20 em `/auth/google/exchange`, `/auth/logout-all` e `POST /activities/import`; 100 no resto. Também por conta, em `/auth/login` (ver abaixo) | Mostra "muitas tentativas, aguarde"; espera o `Retry-After`. Não limpa a sessão |
 
 Casos específicos do refresh token:
 
@@ -255,6 +292,22 @@ Pelo mesmo motivo, todo refresh token enviado e recusado recebe o mesmo 401
 `"Invalid refresh token"`, inclusive quando o backend detecta reuso e encerra
 a sessão daquele cliente. O motivo fica só no log do servidor. O cliente
 não tem como (nem precisa) distinguir os casos: trate como sessão encerrada.
+
+**Limite por conta no login.** Depois de **5 falhas** de login para o mesmo
+email em **15 minutos** (valores padrão do servidor), todo
+`POST /auth/login` daquele email responde **429, mesmo com a senha certa**,
+até os 15 minutos contados da primeira falha acabarem. Vale para qualquer
+email, exista ou não a conta, e a resposta é **idêntica** à do rate limit por
+IP: mesmo `statusCode`, `error`, `message`
+(`ThrottlerException: Too Many Requests`) e header `Retry-After` (segundos até
+liberar). O cliente não tem como (nem precisa) distinguir os dois casos. Um login
+certo antes do limite zera a contagem. O bloqueio não afeta sessões já
+abertas (`/auth/refresh`) nem o login com Google.
+
+Em qualquer 429: mostre "muitas tentativas, aguarde" (sem dizer que a conta
+foi bloqueada), não refaça o login automaticamente e use o `Retry-After` se
+quiser exibir o tempo de espera. Um 429 em `/auth/refresh` não é sessão
+encerrada: mantenha o refresh token e tente de novo depois.
 
 ## Login com Google
 
@@ -442,15 +495,16 @@ sessão e pode ser repetido uma vez com o mesmo token.
 
 No logout, chame `POST /auth/logout` e limpe o estado local. O access token
 continua tecnicamente válido até expirar (é stateless), por isso descartá-lo no
-cliente é obrigatório.
+cliente é obrigatório. O mesmo vale para `POST /auth/logout-all` ("sair de
+todos os dispositivos", ver [acima](#sair-de-todos-os-dispositivos)).
 
 ## CSRF (fluxo web)
 
 `SameSite=Lax` + header obrigatório `X-Client-Type` + CORS de origem única são
 suficientes; **não há token CSRF** e nenhum é necessário hoje:
 
-- Só `/auth/refresh` e `/auth/logout` autenticam por cookie; o resto da API usa
-  `Authorization: Bearer`, imune a CSRF.
+- Só `/auth/refresh` e `/auth/logout` autenticam por cookie; o resto da API
+  (inclusive `/auth/logout-all`) usa `Authorization: Bearer`, imune a CSRF.
 - `Lax` impede o cookie de ir em POST cross-site (o vetor clássico).
 - Um header customizado não pode ser definido por form HTML e, via JS, força
   preflight CORS — que só `FRONTEND_URL` passa.

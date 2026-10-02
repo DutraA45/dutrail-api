@@ -7,10 +7,15 @@ import { AuthController } from '../auth/auth.controller.js';
 import { GOOGLE_CALLBACK_PATH } from '../auth/google-callback.js';
 import {
   googleConfigWarnings,
+  LOGIN_FAILURE_WINDOW_MINUTES_RANGE,
+  LOGIN_MAX_FAILURES_RANGE,
   NodeEnv,
   PLACEHOLDER_FRAGMENTS,
   PRODUCTION_JWT_SECRET_MIN_LENGTH,
   REFRESH_GRACE_MAX_SECONDS,
+  parseTrustProxy,
+  schedulerEnabled,
+  TRUST_PROXY_MAX_HOPS,
   validateEnv,
 } from './env.validation.js';
 
@@ -186,6 +191,34 @@ describe('validateEnv', () => {
     });
   });
 
+  describe('SCHEDULER_ENABLED', () => {
+    const { SCHEDULER_ENABLED: _omitted, ...withoutFlag } = exampleEnv;
+
+    it('é true por padrão (variável ausente)', () => {
+      expect(validateEnv(withoutFlag).SCHEDULER_ENABLED).toBe(true);
+    });
+
+    it('o .env.example liga e o .env.test desliga', () => {
+      expect(validateEnv(exampleEnv).SCHEDULER_ENABLED).toBe(true);
+      expect(validateEnv(testEnv).SCHEDULER_ENABLED).toBe(false);
+    });
+
+    it.each(['yes', '0', ''])('recusa "%s": só true ou false', (value) => {
+      expect(
+        validationMessage({ ...exampleEnv, SCHEDULER_ENABLED: value }),
+      ).toMatch(/SCHEDULER_ENABLED deve ser "true" ou "false"/);
+    });
+
+    it('schedulerEnabled (AppModule) lê o env cru como a validação', () => {
+      expect(schedulerEnabled({})).toBe(true);
+      expect(schedulerEnabled({ SCHEDULER_ENABLED: 'true' })).toBe(true);
+      expect(schedulerEnabled({ SCHEDULER_ENABLED: ' TRUE ' })).toBe(true);
+      expect(schedulerEnabled({ SCHEDULER_ENABLED: 'false' })).toBe(false);
+      expect(schedulerEnabled({ SCHEDULER_ENABLED: ' False' })).toBe(false);
+      expect(schedulerEnabled(testEnv)).toBe(false);
+    });
+  });
+
   describe('JWT_ACCESS_TTL e JWT_REFRESH_TTL', () => {
     it('os arquivos versionados usam 15m e 7d, e o padrão é o mesmo', () => {
       for (const file of [exampleEnv, testEnv]) {
@@ -306,6 +339,170 @@ describe('validateEnv', () => {
         expect(message).not.toContain(exampleEnv.JWT_SECRET);
       },
     );
+  });
+
+  describe('TRUST_PROXY', () => {
+    const { TRUST_PROXY: _omitted, ...withoutTrustProxy } = exampleEnv;
+    const trustProxy = (value: string) =>
+      validateEnv({ ...exampleEnv, TRUST_PROXY: value }).TRUST_PROXY;
+
+    it('é desligado por padrão (variável ausente), e os arquivos versionados o deixam vazio', () => {
+      expect(validateEnv(withoutTrustProxy).TRUST_PROXY).toBe(false);
+      expect(exampleEnv.TRUST_PROXY).toBe('');
+      expect(testEnv.TRUST_PROXY).toBe('');
+      expect(validateEnv(exampleEnv).TRUST_PROXY).toBe(false);
+      expect(validateEnv(testEnv).TRUST_PROXY).toBe(false);
+    });
+
+    it.each(['', '  ', 'false', 'FALSE', ' False '])(
+      'aceita "%s" como desligado',
+      (value) => {
+        expect(trustProxy(value)).toBe(false);
+      },
+    );
+
+    // Number, não string: o Express leria a string "1" como um IP.
+    it.each([
+      ['1', 1],
+      ['2', 2],
+      [' 3 ', 3],
+      [String(TRUST_PROXY_MAX_HOPS), TRUST_PROXY_MAX_HOPS],
+    ])('aceita "%s" saltos como number', (value, expected) => {
+      expect(trustProxy(value)).toBe(expected);
+    });
+
+    it.each([
+      ['10.0.0.5', ['10.0.0.5']],
+      ['10.0.0.0/8', ['10.0.0.0/8']],
+      ['192.168.1.10, 10.0.0.0/16', ['192.168.1.10', '10.0.0.0/16']],
+      ['::1', ['::1']],
+      ['2001:db8::/32', ['2001:db8::/32']],
+      ['::ffff:10.0.0.0/104', ['::ffff:10.0.0.0/104']],
+      ['loopback', ['loopback']],
+      [
+        'Loopback, LinkLocal, uniquelocal',
+        ['loopback', 'linklocal', 'uniquelocal'],
+      ],
+      ['loopback,10.0.0.1', ['loopback', '10.0.0.1']],
+      ['10.0.0.1/32', ['10.0.0.1/32']],
+    ])('aceita a lista "%s"', (value, expected) => {
+      expect(trustProxy(value)).toEqual(expected);
+    });
+
+    function expectRejected(value: string, reason: RegExp) {
+      const message = validationMessage({ ...exampleEnv, TRUST_PROXY: value });
+      expect(message).toMatch(/TRUST_PROXY /);
+      expect(message).toMatch(reason);
+      // Uma linha só para a variável, e nenhum valor recebido no texto.
+      expect(message.match(/TRUST_PROXY/g)).toHaveLength(1);
+      for (const part of value.split(/[\s,]+/).filter((p) => p.length > 1)) {
+        if (!['true', 'false'].includes(part.toLowerCase())) {
+          expect(message).not.toContain(part);
+        }
+      }
+      expect(message).not.toContain(exampleEnv.JWT_SECRET);
+    }
+
+    it.each(['true', 'TRUE', ' True ', '*', '10.0.0.1, *', 'loopback,true'])(
+      'recusa "%s" (confiaria em todos)',
+      (value) => {
+        expectRejected(value, /não aceita "true" nem "\*".*forjável/);
+      },
+    );
+
+    it.each([
+      '0.0.0.0/0',
+      '::/0',
+      '::ffff:0:0/96', // todo o IPv4, pelos endereços IPv4-mapped
+      '::/80', // contém ::ffff:0:0/96
+      '10.0.0.1, 0.0.0.0/0',
+    ])('recusa a faixa "%s" (cobre todos os endereços)', (value) => {
+      expectRejected(value, /cobre todos os endereços.*forjável/);
+    });
+
+    it.each(['0', '11', '99', '007x'])(
+      'recusa "%s" saltos fora da faixa ou malformados',
+      (value) => {
+        const message = validationMessage({
+          ...exampleEnv,
+          TRUST_PROXY: value,
+        });
+        expect(message).toMatch(/TRUST_PROXY /);
+        if (/^\d+$/.test(value)) {
+          expect(message).toContain(
+            `TRUST_PROXY com número de saltos deve ser um inteiro de 1 a ${TRUST_PROXY_MAX_HOPS}`,
+          );
+        }
+      },
+    );
+
+    it.each([
+      ['1.5', /não é IP, CIDR nem um dos nomes/],
+      ['-1', /não é IP, CIDR nem um dos nomes/],
+      ['010.0.0.1', /não é IP, CIDR nem um dos nomes/],
+      ['meu-proxy.local', /não é IP, CIDR nem um dos nomes/],
+      ['fe80::1%eth0', /não é IP, CIDR nem um dos nomes/],
+      ['all', /não é IP, CIDR nem um dos nomes/],
+      ['10.0.0.0/33', /prefixo inválido/],
+      ['10.0.0.0/255.0.0.0', /prefixo inválido/],
+      ['10.0.0.0/', /prefixo inválido/],
+      ['10.0.0.0/8/1', /não é IP, CIDR nem um dos nomes/],
+      ['10.0.0.1,', /entrada vazia/],
+      ['10.0.0.1,,10.0.0.2', /entrada vazia/],
+    ])('recusa "%s" com o motivo, sem repetir o valor', (value, reason) => {
+      expectRejected(value, reason);
+    });
+
+    it('parseTrustProxy aceita o valor ausente e recusa não-texto', () => {
+      expect(parseTrustProxy(undefined)).toEqual({ ok: true, value: false });
+      expect(parseTrustProxy(1)).toMatchObject({ ok: false });
+    });
+  });
+
+  describe('LOGIN_MAX_FAILURES e LOGIN_FAILURE_WINDOW_MINUTES', () => {
+    const {
+      LOGIN_MAX_FAILURES: _max,
+      LOGIN_FAILURE_WINDOW_MINUTES: _window,
+      ...withoutLoginLimit
+    } = exampleEnv;
+
+    it('são 5 e 15 por padrão (variáveis ausentes), e os arquivos versionados usam os mesmos', () => {
+      for (const env of [withoutLoginLimit, exampleEnv, testEnv]) {
+        const parsed = validateEnv(env);
+        expect(parsed.LOGIN_MAX_FAILURES).toBe(5);
+        expect(parsed.LOGIN_FAILURE_WINDOW_MINUTES).toBe(15);
+      }
+    });
+
+    it('aceitam os extremos das faixas', () => {
+      for (const [name, range] of [
+        ['LOGIN_MAX_FAILURES', LOGIN_MAX_FAILURES_RANGE],
+        ['LOGIN_FAILURE_WINDOW_MINUTES', LOGIN_FAILURE_WINDOW_MINUTES_RANGE],
+      ] as const) {
+        for (const value of [range.min, range.max]) {
+          expect(
+            validateEnv({ ...exampleEnv, [name]: ` ${value} ` })[name],
+          ).toBe(value);
+        }
+      }
+    });
+
+    it.each([
+      [
+        'LOGIN_MAX_FAILURES',
+        `de ${LOGIN_MAX_FAILURES_RANGE.min} a ${LOGIN_MAX_FAILURES_RANGE.max} (falhas)`,
+      ],
+      [
+        'LOGIN_FAILURE_WINDOW_MINUTES',
+        `de ${LOGIN_FAILURE_WINDOW_MINUTES_RANGE.min} a ${LOGIN_FAILURE_WINDOW_MINUTES_RANGE.max} (minutos)`,
+      ],
+    ])('%s recusa valores fora da faixa ou malformados', (name, rule) => {
+      for (const value of ['0', '101', '-1', '1.5', '15m', '', '1e1', 'abc']) {
+        const message = validationMessage({ ...exampleEnv, [name]: value });
+        expect(message, value).toContain(`${name} deve ser um inteiro ${rule}`);
+        expect(message.match(new RegExp(name, 'g')), value).toHaveLength(1);
+      }
+    });
   });
 
   describe('JWT_ISSUER', () => {

@@ -13,6 +13,7 @@ import {
   ValidateBy,
   validateSync,
 } from 'class-validator';
+import { BlockList, isIP } from 'node:net';
 
 export enum NodeEnv {
   Development = 'development',
@@ -34,6 +35,140 @@ export const REFRESH_TTL_MAX = { seconds: 30 * 86_400, label: '30d' } as const;
 
 /** Teto da janela de tolerância do refresh token (A-04). */
 export const REFRESH_GRACE_MAX_SECONDS = 60;
+
+/** Faixas do limite de falhas de login por conta (A-03). */
+export const LOGIN_MAX_FAILURES_RANGE = { min: 1, max: 100 } as const;
+export const LOGIN_FAILURE_WINDOW_MINUTES_RANGE = { min: 1, max: 60 } as const;
+
+/** Teto de saltos aceitos em TRUST_PROXY (A-03). */
+export const TRUST_PROXY_MAX_HOPS = 10;
+
+/** Nomes pré-definidos do Express (proxy-addr) aceitos em TRUST_PROXY. */
+export const TRUST_PROXY_NAMES = [
+  'loopback',
+  'linklocal',
+  'uniquelocal',
+] as const;
+
+/**
+ * Valor de `trust proxy` do Express: desligado, número de saltos, ou lista de
+ * IPs/CIDRs/nomes. Nunca `true` (confiar em todos tornaria o X-Forwarded-For
+ * forjável por qualquer cliente).
+ */
+export type TrustProxySetting = false | number | string[];
+
+/** Resultado de parseTrustProxy: o valor pronto para o Express, ou o motivo. */
+export type TrustProxyParse =
+  { ok: true; value: TrustProxySetting } | { ok: false; reason: string };
+
+/** Marca um TRUST_PROXY recusado, para o validador montar a mensagem. */
+class InvalidTrustProxy {
+  constructor(readonly reason: string) {}
+}
+
+const TRUSTS_EVERYONE =
+  'confiaria em qualquer cliente: o X-Forwarded-For passaria a ser forjável e o rate limit por IP deixaria de valer';
+
+/**
+ * A faixa cobre todo o IPv4 (direto, ou pelos endereços IPv4-mapped, que o
+ * Express também compara) ou todo o IPv6? Faixas são contíguas: conter as
+ * duas pontas é conter tudo.
+ */
+function coversEveryone(address: string, prefix: number): boolean {
+  const family = isIP(address) === 4 ? 'ipv4' : 'ipv6';
+  const range = new BlockList();
+  range.addSubnet(address, prefix, family);
+  const covers = (low: string, high: string, kind: 'ipv4' | 'ipv6') =>
+    range.check(low, kind) && range.check(high, kind);
+  return family === 'ipv4'
+    ? covers('0.0.0.0', '255.255.255.255', 'ipv4')
+    : covers('::', 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', 'ipv6') ||
+        covers('::ffff:0.0.0.0', '::ffff:255.255.255.255', 'ipv6');
+}
+
+/** Uma entrada da lista: nome pré-definido, IP, ou IP/prefixo. */
+function parseTrustProxyEntry(entry: string): string | { reason: string } {
+  const name = entry.toLowerCase();
+  if ((TRUST_PROXY_NAMES as readonly string[]).includes(name)) return name;
+
+  const [address, prefixText, ...rest] = entry.split('/');
+  const family = isIP(address);
+  // Zona IPv6 (fe80::1%eth0) é aceita pelo node:net, mas não pelo Express.
+  if (family === 0 || address.includes('%') || rest.length > 0) {
+    return {
+      reason: `tem uma entrada que não é IP, CIDR nem um dos nomes ${TRUST_PROXY_NAMES.join(', ')}`,
+    };
+  }
+  if (prefixText === undefined) return address;
+
+  const maxPrefix = family === 4 ? 32 : 128;
+  const prefix = /^\d{1,3}$/.test(prefixText) ? Number(prefixText) : NaN;
+  if (!(prefix >= 0 && prefix <= maxPrefix)) {
+    return {
+      reason: `tem um CIDR com prefixo inválido (use um inteiro de 0 a 32 no IPv4 e de 0 a 128 no IPv6; máscara por extenso não é aceita)`,
+    };
+  }
+  if (coversEveryone(address, prefix)) {
+    return {
+      reason: `tem uma faixa que cobre todos os endereços e ${TRUSTS_EVERYONE}`,
+    };
+  }
+  return `${address}/${prefix}`;
+}
+
+/**
+ * Interpreta TRUST_PROXY (A-03). Aceita: ausente, vazio ou "false"
+ * (desligado); um inteiro de 1 a TRUST_PROXY_MAX_HOPS (saltos, convertido em
+ * number: o Express leria a string "1" como um IP); ou uma lista separada por
+ * vírgulas de IPs, CIDRs e nomes pré-definidos. Recusa "true", "*" e faixas
+ * que cobrem todos os endereços. O motivo nunca repete o valor.
+ */
+export function parseTrustProxy(raw: unknown): TrustProxyParse {
+  if (raw === undefined || raw === null || raw === false) {
+    return { ok: true, value: false };
+  }
+  if (typeof raw !== 'string') {
+    return { ok: false, reason: 'deve ser texto' };
+  }
+  const value = raw.trim();
+  const lower = value.toLowerCase();
+  if (value === '' || lower === 'false') return { ok: true, value: false };
+  if (lower === 'true' || value === '*') {
+    return {
+      ok: false,
+      reason: `não aceita "true" nem "*": ${TRUSTS_EVERYONE}`,
+    };
+  }
+
+  if (/^\d+$/.test(value)) {
+    const hops = Number(value);
+    if (hops >= 1 && hops <= TRUST_PROXY_MAX_HOPS) {
+      return { ok: true, value: hops };
+    }
+    return {
+      ok: false,
+      reason: `com número de saltos deve ser um inteiro de 1 a ${TRUST_PROXY_MAX_HOPS} (para desligar, deixe vazio ou use "false")`,
+    };
+  }
+
+  const entries = value.split(',').map((e) => e.trim());
+  if (entries.some((e) => e === '')) {
+    return { ok: false, reason: 'tem uma entrada vazia na lista' };
+  }
+  const parsed: string[] = [];
+  for (const entry of entries) {
+    if (entry === '*' || entry.toLowerCase() === 'true') {
+      return {
+        ok: false,
+        reason: `não aceita "true" nem "*": ${TRUSTS_EVERYONE}`,
+      };
+    }
+    const result = parseTrustProxyEntry(entry);
+    if (typeof result !== 'string') return { ok: false, ...result };
+    parsed.push(result);
+  }
+  return { ok: true, value: parsed };
+}
 
 /** "15m" -> 900. `undefined` se o formato não for o aceito. */
 export function ttlToSeconds(value: unknown): number | undefined {
@@ -60,6 +195,25 @@ function IsTtl(max: { seconds: number; label: string }): PropertyDecorator {
         ttlToSeconds(args?.value) === undefined
           ? `${args?.property} deve ser um inteiro positivo seguido de s, m, h ou d (ex.: 15m, 7d); sem unidade, o jsonwebtoken leria o número como milissegundos`
           : `${args?.property} não pode passar de ${max.label}`,
+    },
+  });
+}
+
+/** Inteiro dentro da faixa; a mensagem diz a variável, a faixa e a unidade. */
+function IsIntInRange(
+  name: string,
+  range: { min: number; max: number },
+  unit: string,
+): PropertyDecorator {
+  return ValidateBy({
+    name: 'isIntInRange',
+    validator: {
+      validate: (value) =>
+        Number.isInteger(value) &&
+        (value as number) >= range.min &&
+        (value as number) <= range.max,
+      defaultMessage: () =>
+        `${name} deve ser um inteiro de ${range.min} a ${range.max} (${unit})`,
     },
   });
 }
@@ -99,6 +253,13 @@ export class EnvironmentVariables {
   @Transform(({ obj, key }) => parseBooleanFlag(obj[key]))
   @IsBoolean({ message: 'SECURITY_LOG_ENABLED deve ser "true" ou "false"' })
   SECURITY_LOG_ENABLED: boolean = true;
+
+  // Jobs agendados (A-12: limpeza diária de tokens expirados). Ligado por
+  // padrão; o .env.test o desliga para nenhum cron rodar durante os testes.
+  // Lido também no AppModule (schedulerEnabled), antes da validação.
+  @Transform(({ obj, key }) => parseBooleanFlag(obj[key]))
+  @IsBoolean({ message: 'SCHEDULER_ENABLED deve ser "true" ou "false"' })
+  SCHEDULER_ENABLED: boolean = true;
 
   @IsString()
   @IsNotEmpty()
@@ -146,6 +307,39 @@ export class EnvironmentVariables {
     },
   })
   REFRESH_GRACE_SECONDS: number = 30;
+
+  // `trust proxy` do Express (A-03): de quem aceitar o X-Forwarded-For para
+  // definir o req.ip (rate limit e log de segurança). Desligado por padrão;
+  // ver parseTrustProxy e "Rate limit e proxy" no README.
+  @Transform(({ obj, key }) => {
+    const parsed = parseTrustProxy(obj[key]);
+    return parsed.ok ? parsed.value : new InvalidTrustProxy(parsed.reason);
+  })
+  @ValidateBy({
+    name: 'isTrustProxy',
+    validator: {
+      validate: (value) => !(value instanceof InvalidTrustProxy),
+      defaultMessage: (args) =>
+        `TRUST_PROXY ${(args?.value as InvalidTrustProxy | undefined)?.reason ?? 'é inválido'}`,
+    },
+  })
+  TRUST_PROXY: TrustProxySetting = false;
+
+  // Falhas de login por conta (A-03): passando de LOGIN_MAX_FAILURES dentro
+  // de LOGIN_FAILURE_WINDOW_MINUTES, o login daquele email responde 429 até a
+  // janela acabar. Janela curta de propósito: o bloqueio também pode ser
+  // disparado por um atacante contra a conta de outra pessoa.
+  @Transform(({ obj, key }) => parseNonNegativeInt(obj[key]))
+  @IsIntInRange('LOGIN_MAX_FAILURES', LOGIN_MAX_FAILURES_RANGE, 'falhas')
+  LOGIN_MAX_FAILURES: number = 5;
+
+  @Transform(({ obj, key }) => parseNonNegativeInt(obj[key]))
+  @IsIntInRange(
+    'LOGIN_FAILURE_WINDOW_MINUTES',
+    LOGIN_FAILURE_WINDOW_MINUTES_RANGE,
+    'minutos',
+  )
+  LOGIN_FAILURE_WINDOW_MINUTES: number = 15;
 
   @IsString()
   @IsNotEmpty()
@@ -306,6 +500,16 @@ function parseBooleanFlag(raw: unknown): unknown {
   if (value === 'true' || value === true) return true;
   if (value === 'false' || value === false) return false;
   return raw;
+}
+
+/**
+ * Decide, a partir do process.env cru, se o ScheduleModule é registrado
+ * (AppModule, via ConditionalModule). Ausente vale true, como o default da
+ * classe; um valor inválido nunca chega aqui, porque o validateEnv já recusou
+ * o boot.
+ */
+export function schedulerEnabled(env: Record<string, unknown>): boolean {
+  return parseBooleanFlag(env.SCHEDULER_ENABLED ?? true) === true;
 }
 
 /**

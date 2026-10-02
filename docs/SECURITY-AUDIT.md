@@ -44,7 +44,7 @@ corrigido, decisão registrada) ou **Pendente** (ainda não tratado).
 | ---- | ----------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---- | ------ |
 | A-01 | **Alta**    | 8    | `src/auth/auth.service.ts:103-109`, `src/users/users.service.ts:52-66`, `src/auth/auth.service.ts:41-58`                                                        | **Account pre-hijacking.** O signup não verifica o email (qualquer um cadastra qualquer email). Quando o dono real entra depois com Google (email verificado), `linkGoogleAccount` vincula a conta e marca `emailVerified: true`, **sem descartar o `passwordHash` nem revogar sessões existentes**. O contrato confirma: "a senha antiga continua valendo" (`docs/API-CONTRACT.md` §Login com Google). | Atacante cadastra `vitima@gmail.com` com senha própria e espera. A vítima entra com Google, "herda" a conta, importa atividades (GPS, FC, calorias). O atacante continua logando com a senha dele e lê tudo, indefinidamente. Variante: a vítima que nunca usar Google fica impedida de se cadastrar por email (409) e não há reset de senha. | Na vinculação, se `byEmail.emailVerified === false`: numa única `$transaction`, zerar `passwordHash`, revogar todos os `RefreshToken`/`OAuthExchangeCode` do usuário e só então vincular. Alternativa mais restritiva: recusar a vinculação automática e exigir login por senha para vincular. Adicionar e2e cobrindo o cenário. | P    | **Corrigido.** Ver [nota](#a-01). |
 | A-02 | **Média**   | 8    | `src/auth/strategies/google.strategy.ts:25-30`; `node_modules/passport-oauth2/lib/strategy.js:109-113`                                                          | **Redirect do Google sem `state` e sem PKCE.** Sem `state`/`pkce` nas opções, o passport-oauth2 usa o `NullStore`: o callback aceita qualquer `code` sem vínculo com o browser que iniciou o fluxo. Contraria RFC 9700 §2.1 e §4.7 (proteção CSRF obrigatória; PKCE recomendado também para cliente confidencial). | **Login CSRF**: o atacante inicia o fluxo com a própria conta Google, para antes do callback e faz a vítima abrir essa URL. A vítima fica logada na conta do atacante e as atividades que importar (com trilhas GPS) vão para ele. Também permite injeção de `code` interceptado.                                                  | Habilitar `state: true` e `pkce: true` com um store próprio (sessão está desligada): cookie curto, assinado, `HttpOnly`, `SameSite=Lax`, `Path=/auth/google`, guardando nonce e `code_verifier`; ou uma tabela com TTL. Validar no callback e apagar o cookie.                                                           | M    | **Corrigido.** Ver [nota](#a-02). |
-| A-03 | **Média**   | 3    | `src/app.setup.ts:42-44`, `src/auth/auth.controller.ts:59`, `src/app.module.ts:22-34`; `node_modules/@nestjs/throttler/dist/throttler.guard.js:144-145`          | **Rate limit só por IP, sem `trust proxy`, sem limite por conta nem atraso progressivo.** O tracker padrão é `req.ip`; `trust proxy` está comentado. Storage em memória (por processo, zera no restart). `/auth/refresh`, `/auth/logout` e `/auth/google/exchange` ficam só no limite global (100/min). Não há bloqueio nem backoff por email (ASVS 2.2.1). | (a) Atrás de proxy reverso/LB na VM Oracle, todos os clientes compartilham o IP do proxy: **10 logins/min para o mundo inteiro**, e qualquer um derruba o login de todos. (b) Com IPs distribuídos (botnet, IPv6), o credential stuffing contra uma conta fica ilimitado (N IPs × 10/min). (c) Se alguém "consertar" com `trust proxy: true`, o `X-Forwarded-For` passa a ser forjável e o limite some. | Definir `trust proxy` com o número exato de saltos ou o IP do proxy (nunca `true`). Adicionar um segundo throttler com chave = email normalizado para login (ex.: 5 falhas/15 min, com backoff exponencial), sem revelar se a conta existe. Limite próprio em `/auth/refresh` e `/auth/google/exchange`. Storage Redis se houver mais de uma instância. | M    | Pendente |
+| A-03 | **Média**   | 3    | `src/app.setup.ts:42-44`, `src/auth/auth.controller.ts:59`, `src/app.module.ts:22-34`; `node_modules/@nestjs/throttler/dist/throttler.guard.js:144-145`          | **Rate limit só por IP, sem `trust proxy`, sem limite por conta nem atraso progressivo.** O tracker padrão é `req.ip`; `trust proxy` está comentado. Storage em memória (por processo, zera no restart). `/auth/refresh`, `/auth/logout` e `/auth/google/exchange` ficam só no limite global (100/min). Não há bloqueio nem backoff por email (ASVS 2.2.1). | (a) Atrás de proxy reverso/LB na VM Oracle, todos os clientes compartilham o IP do proxy: **10 logins/min para o mundo inteiro**, e qualquer um derruba o login de todos. (b) Com IPs distribuídos (botnet, IPv6), o credential stuffing contra uma conta fica ilimitado (N IPs × 10/min). (c) Se alguém "consertar" com `trust proxy: true`, o `X-Forwarded-For` passa a ser forjável e o limite some. | Definir `trust proxy` com o número exato de saltos ou o IP do proxy (nunca `true`). Adicionar um segundo throttler com chave = email normalizado para login (ex.: 5 falhas/15 min, com backoff exponencial), sem revelar se a conta existe. Limite próprio em `/auth/refresh` e `/auth/google/exchange`. Storage Redis se houver mais de uma instância. | M    | **Corrigido.** Ver [nota](#a-03). |
 | A-04 | **Média**   | 5    | `src/auth/token.service.ts:145-151`, `:120-125`, `:92-100`; `prisma/schema.prisma:36-48`; `docs/AUTH-CONTRACT-MOBILE.md:276-280`                                 | **Detecção de reuso sem família de tokens: qualquer reuso revoga todas as sessões de todos os dispositivos, sem janela de tolerância.** Não há `familyId`/`replacedBy`; `revokeAllForUser` pega todo `userId`. Ver [análise do item 5](#item-5--cenário-mobile-resposta-do-refresh-perdida). | (a) Rede móvel perde a resposta do refresh e o app (seguindo o contrato, que manda **não** limpar a sessão em erro de rede) reapresenta o token antigo: logout em web e em todos os celulares. (b) Duas abas web renovando juntas podem disparar o mesmo efeito. (c) DoS dirigido: quem tiver **qualquer** refresh token antigo da vítima (ainda dentro do `exp`) derruba todas as sessões dela, repetidamente, por até 7 dias. | Adicionar `familyId` (herdado na rotação) e revogar só a família no reuso. Adicionar janela de tolerância (30–60 s, uso único) para o token recém-rotacionado cujo sucessor ainda não foi usado. Envolver CAS + emissão numa `$transaction`. Detalhes na análise abaixo.                                                              | M    | **Corrigido.** Ver [nota](#a-04). |
 | A-05 | **Média**   | 4, 13 | `src/config/env.validation.ts:28-29`, `:42-49`; `.env.example` (`JWT_SECRET`, `JWT_REFRESH_SECRET`)                                                            | **Validação de segredos aceita placeholders conhecidos e `NODE_ENV` falha aberto.** A regra é só `MinLength(32)` e segredos diferentes entre si. Os placeholders do `.env.example` (frases "troque-…" com mais de 50 chars) passam. `NODE_ENV` tem default `development`. No `.env` local, os dois segredos JWT são frases legíveis de dev (não aleatórias): aceitável só em dev. | Deploy com o `.env.example` copiado: o segredo HS256 é público no repositório e qualquer um forja access tokens com `sub` arbitrário (**takeover de qualquer conta**). `NODE_ENV` esquecido em produção: cookie sem `Secure` (A-11) e Swagger exposto (A-10).                                                                        | No boot, recusar segredos que contenham trechos do `.env.example` (ex.: "troque") ou com entropia baixa; exigir ≥ 43 chars base64url (256 bits). Tornar `NODE_ENV` obrigatório, sem default. Documentar a geração (`randomBytes(48)`, já citado no `.env.example`).                                                                | P    | **Corrigido.** Ver [nota](#a-05). |
 | A-06 | **Média**   | 11   | `src/app.setup.ts:12-57` (sem Helmet); `package.json:29-51` (`helmet` ausente); `node_modules/express/lib/application.js:94`                                     | **Sem cabeçalhos de segurança.** Não há Helmet: sem `Strict-Transport-Security`, `X-Content-Type-Options`, `Content-Security-Policy`/`frame-ancestors` (a Swagger UI é HTML) nem `Referrer-Policy`. `X-Powered-By: Express` segue ativo (padrão do Express 5). ASVS 14.4.x, 9.1.1.                                          | Sem HSTS, o primeiro acesso por `http://` fica exposto a SSL stripping (vale para o access token no corpo, embora o cookie `Secure` resista). A Swagger UI pode ser emoldurada (clickjacking do "Try it out" com Bearer colado). Fingerprinting do stack.                                                            | `app.use(helmet())` com HSTS `max-age=31536000; includeSubDomains`, CSP compatível com a Swagger UI (ou Swagger desligado em produção) e `frame-ancestors 'none'`. O Helmet já remove o `X-Powered-By`. Se o HSTS ficar no proxy, documentar.                                                                              | P    | **Corrigido.** helmet é o primeiro middleware (`src/app.setup.ts`): HSTS `max-age=31536000; includeSubDomains` emitido pela app, CSP padrão do helmet com `frame-ancestors 'none'`, `X-Frame-Options: DENY`, nosniff, `Referrer-Policy: no-referrer`, sem `X-Powered-By`, inclusive em 401/404. Só `/docs`, `/docs/*` e `/docs-json` recebem a CSP sem `upgrade-insecure-requests`. Coberto por `test/security-headers.e2e-spec.ts`. |
@@ -284,6 +284,54 @@ apaga o cookie, então o login legítimo em curso também termina em
 `state_mismatch`. O atacante não ganha acesso, só obriga a vítima a repetir o
 login.
 
+### A-03
+
+**O que mudou.**
+
+- **`TRUST_PROXY` configurável** (`parseTrustProxy` em
+  `src/config/env.validation.ts`, aplicado em `src/app.setup.ts`): aceita um
+  número de saltos, uma lista de IPs/CIDRs ou os nomes pré-definidos do
+  Express (`loopback`, `linklocal`, `uniquelocal`). `true`, `*` e faixas que
+  cobrem todos os endereços são recusados no boot. Fica desligado por padrão,
+  e em produção sem a variável o boot emite um warn (`warnAboutTrustProxy`).
+- **Limite por conta no login** (`src/auth/login-attempts.service.ts`): a
+  chave é o SHA-256 do email normalizado, aplicada exista ou não a conta.
+  Passando de `LOGIN_MAX_FAILURES` (padrão 5) dentro de
+  `LOGIN_FAILURE_WINDOW_MINUTES` (padrão 15), o login daquele email responde
+  429 até a janela acabar. O 429 é idêntico ao do limite por IP (mesma
+  exceção e mesma mensagem), com `Retry-After`.
+- **Limites por rota**: login e signup 10/min, refresh e logout 30/min,
+  `google/exchange` e `logout-all` 20/min (`src/auth/auth.controller.ts`),
+  import 20/min (`src/activities/activities.controller.ts`).
+- **Log**: o evento `rate_limited` registra o `path` (sem query string) e,
+  no limite por conta, `reason: account_login_limit`.
+
+Cobertura: `test/rate-limit.e2e-spec.ts`, `src/auth/login-attempts.service.spec.ts`,
+`src/config/env.validation.spec.ts`, `src/app.setup.spec.ts` e
+`src/common/filters/all-exceptions.filter.spec.ts`.
+
+**Riscos aceitos e pendências:**
+
+1. **DoS de conta.** Quem souber o email de alguém pode travar o login por
+   senha dessa pessoa por até uma janela. Mitigado pelo limite de 5, pela
+   janela de 15 min e pelo 429 igual para todos. Só afeta `POST /auth/login`:
+   não impede refresh, login com Google nem o login de outros emails.
+2. **Store em memória** (`InMemoryLoginAttemptsStore`): por processo, zera no
+   restart e não é compartilhado entre instâncias. A interface
+   `LoginAttemptsStore` está pronta para trocar por Redis.
+3. **Teto de 50 mil chaves**: com o mapa cheio, a janela mais antiga é
+   descartada. Um atacante com muitos IPs poderia encher o mapa e apagar a
+   contagem de um alvo.
+4. O 429 por conta carrega os headers `X-RateLimit-*` do limite por IP.
+5. Backoff progressivo não implementado.
+6. O 409 do signup concorrente (P2002, traduzido pelo `AllExceptionsFilter`)
+   não gera `signup_conflict`.
+
+**Pendência operacional:** o valor de `TRUST_PROXY` só deve ser definido na
+VM, depois de confirmar a topologia do proxy (por exemplo, `1` para um único
+proxy na frente da API). Enquanto estiver desligado, o `ip` dos logs e dos
+limites é o do proxy.
+
 ### A-04
 
 **O que mudou.** `RefreshToken` ganhou `familyId`, `rotatedAt`, `successorId`
@@ -374,10 +422,11 @@ sugeridos estão no `README.md` ("Logs de segurança"). Cobertura:
 
 **Riscos residuais:**
 
-- Até o A-03, `ip` é o `req.ip` sem `trust proxy`: atrás de proxy, é o IP do
-  proxy, não o do cliente.
-- Ficam sem log o signup recusado com 409 (email já cadastrado) e a rota que
-  gerou o `rate_limited`. Os dois estão no backlog.
+- `ip` é o `req.ip`, que depende do `TRUST_PROXY` (A-03). Enquanto ele
+  estiver desligado, atrás de proxy, é o IP do proxy, não o do cliente.
+- Desde o A-03, o `rate_limited` registra o `path` da rota, e o signup
+  recusado com 409 (email já cadastrado) gera o evento `signup_conflict`,
+  exceto no signup concorrente (ver A-03).
 - Os alertas estão só documentados; nenhum está configurado.
 
 ### A-10
