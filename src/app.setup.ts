@@ -120,9 +120,15 @@ export function configureApp(app: INestApplication): void {
     credentials: true,
   });
 
-  // Atrás de um proxy/load balancer (Render, Fly, Railway...), descomente para
-  // o rate limit enxergar o IP real do cliente em vez do IP do proxy:
-  // app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  // De quem aceitar o X-Forwarded-For para definir o req.ip, que o rate limit
+  // e o log de segurança usam (A-03). Desligado por padrão: sem proxy na
+  // frente, o header vem do próprio cliente e seria forjável. O valor já vem
+  // validado e convertido (número de saltos como number, nunca `true`).
+  app
+    .getHttpAdapter()
+    .getInstance()
+    .set('trust proxy', config.get('TRUST_PROXY', { infer: true }));
+  warnAboutTrustProxy(config);
 
   if (!swaggerEnabled) return;
 
@@ -161,4 +167,20 @@ export function warnAboutGoogleConfig(
   for (const warning of warnings) {
     logger.warn(warning);
   }
+}
+
+/**
+ * Em produção sem TRUST_PROXY, lembra (sem falhar) que atrás de um proxy
+ * reverso ou load balancer o IP visto pelo rate limit e pelo log de segurança
+ * é o do proxy. Sem proxy na frente, desligado é o correto.
+ */
+export function warnAboutTrustProxy(
+  config: ConfigService<EnvironmentVariables, true>,
+  logger = new Logger('Config'),
+): void {
+  if (config.get('NODE_ENV', { infer: true }) !== NodeEnv.Production) return;
+  if (config.get('TRUST_PROXY', { infer: true }) !== false) return;
+  logger.warn(
+    'TRUST_PROXY não definido: se a API estiver atrás de um proxy reverso ou load balancer, o IP visto pelo rate limit e pelo log de segurança será o do proxy (ver "Rate limit e proxy" no README)',
+  );
 }

@@ -5,6 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ThrottlerException } from '@nestjs/throttler';
+import { AccountLoginLimitException } from '../../auth/login-attempts.service.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import type { SecurityLogService } from '../../security/security-log.service.js';
 import { AllExceptionsFilter } from './all-exceptions.filter.js';
@@ -33,7 +34,11 @@ function createHost(
     headers: {},
     ...partial,
   };
-  const response = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+  const response = {
+    status: vi.fn().mockReturnThis(),
+    json: vi.fn(),
+    header: vi.fn().mockReturnThis(),
+  };
   const host = {
     switchToHttp: () => ({
       getResponse: () => response,
@@ -141,7 +146,7 @@ describe('AllExceptionsFilter', () => {
       path: '/auth/google/callback',
     };
 
-    it('429 vira rate_limited, com ip, user-agent e client type válido', () => {
+    it('429 vira rate_limited, com ip, user-agent, client type válido e a rota', () => {
       const { host, response } = createHost({
         headers: { 'user-agent': 'curl/8', 'x-client-type': 'mobile' },
       });
@@ -151,7 +156,46 @@ describe('AllExceptionsFilter', () => {
       expect(securityLog.warn).toHaveBeenCalledWith(
         'rate_limited',
         { ip: '203.0.113.7', userAgent: 'curl/8', clientType: 'mobile' },
-        { userId: undefined },
+        { userId: undefined, path: '/auth/login', reason: undefined },
+      );
+      // O Retry-After do throttler por IP é setado pelo próprio guard.
+      expect(response.header).not.toHaveBeenCalled();
+    });
+
+    it('a rota do rate_limited é o path, sem query string', () => {
+      const { host } = createHost({
+        method: 'GET',
+        url: '/activities?cursor=abc&limit=10',
+        path: '/activities',
+      });
+      filter.catch(new ThrottlerException(), host);
+
+      const details = securityLog.warn.mock.calls[0][2] as { path: string };
+      expect(details.path).toBe('/activities');
+      expect(JSON.stringify(securityLog.warn.mock.calls)).not.toContain('?');
+    });
+
+    it('o 429 do limite por conta (A-03) sai igual ao do throttler, com Retry-After e reason próprio', () => {
+      const ip = createHost();
+      filter.catch(new ThrottlerException(), ip.host);
+      const account = createHost();
+      filter.catch(new AccountLoginLimitException(42), account.host);
+
+      const { timestamp: _a, ...ipBody } = ip.response.json.mock.calls[0][0];
+      const { timestamp: _b, ...accountBody } =
+        account.response.json.mock.calls[0][0];
+      expect(accountBody).toEqual(ipBody);
+      expect(account.response.status).toHaveBeenCalledWith(429);
+      expect(account.response.header).toHaveBeenCalledWith('Retry-After', '42');
+
+      expect(securityLog.warn).toHaveBeenLastCalledWith(
+        'rate_limited',
+        expect.anything(),
+        {
+          userId: undefined,
+          path: '/auth/login',
+          reason: 'account_login_limit',
+        },
       );
     });
 
@@ -167,7 +211,7 @@ describe('AllExceptionsFilter', () => {
       expect(securityLog.warn).toHaveBeenCalledWith(
         'rate_limited',
         expect.objectContaining({ clientType: undefined }),
-        { userId: 'user-1' },
+        { userId: 'user-1', path: '/activities', reason: undefined },
       );
     });
 

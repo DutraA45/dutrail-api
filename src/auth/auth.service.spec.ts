@@ -12,6 +12,11 @@ import { UsersService } from '../users/users.service.js';
 import type { User } from '../generated/prisma/client.js';
 import { AuthService, BREACHED_PASSWORD_MESSAGE } from './auth.service.js';
 import { BreachedPasswordService } from './breached-password.service.js';
+import { AuthService } from './auth.service.js';
+import {
+  AccountLoginLimitException,
+  LoginAttemptsService,
+} from './login-attempts.service.js';
 import { PasswordService } from './password.service.js';
 import { TokenService } from './token.service.js';
 
@@ -60,11 +65,12 @@ describe('AuthService', () => {
     $transaction: any;
   };
   let tx: {
-    refreshToken: { deleteMany: any };
+    refreshToken: { findMany: any; deleteMany: any };
     oAuthExchangeCode: { deleteMany: any };
   };
   let securityLog: { log: any; warn: any };
   let breached: { check: any };
+  let loginAttempts: { consume: any; succeeded: any };
 
   beforeEach(async () => {
     users = {
@@ -93,11 +99,15 @@ describe('AuthService', () => {
       $transaction: vi.fn((fn: (client: typeof tx) => unknown) => fn(tx)),
     };
     tx = {
-      refreshToken: { deleteMany: vi.fn() },
+      refreshToken: { findMany: vi.fn(), deleteMany: vi.fn() },
       oAuthExchangeCode: { deleteMany: vi.fn() },
     };
     securityLog = { log: vi.fn(), warn: vi.fn() };
     breached = { check: vi.fn().mockResolvedValue('clean') };
+    loginAttempts = {
+      consume: vi.fn().mockResolvedValue(undefined),
+      succeeded: vi.fn().mockResolvedValue(undefined),
+    };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -108,6 +118,7 @@ describe('AuthService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: SecurityLogService, useValue: securityLog },
         { provide: BreachedPasswordService, useValue: breached },
+        { provide: LoginAttemptsService, useValue: loginAttempts },
       ],
     }).compile();
 
@@ -248,6 +259,12 @@ describe('AuthService', () => {
       await service.signup('ana@example.com', '㍿'.repeat(32), undefined, ctx);
 
       expect(password.hash).toHaveBeenCalledWith('㍿'.repeat(32));
+      // Sem texto livre: só o userId da conta existente e o email (mascarado
+      // pelo serviço de log).
+      expect(securityLog.warn).toHaveBeenCalledWith('signup_conflict', ctx, {
+        userId: 'user-1',
+        email: 'ana@example.com',
+      });
     });
   });
 
@@ -269,6 +286,22 @@ describe('AuthService', () => {
       });
       // A lista de vazadas só é consultada quando a senha é definida.
       expect(breached.check).not.toHaveBeenCalled();
+      expect(loginAttempts.consume).toHaveBeenCalledWith('ana@example.com');
+      expect(loginAttempts.succeeded).toHaveBeenCalledWith('ana@example.com');
+    });
+
+    it('com o limite por conta atingido, responde 429 sem consultar a conta nem a senha', async () => {
+      loginAttempts.consume.mockRejectedValue(
+        new AccountLoginLimitException(60),
+      );
+
+      await expect(
+        service.login('ana@example.com', 'S3nh@Forte!', ctx),
+      ).rejects.toBeInstanceOf(AccountLoginLimitException);
+      expect(users.findByEmail).not.toHaveBeenCalled();
+      expect(password.verify).not.toHaveBeenCalled();
+      expect(loginAttempts.succeeded).not.toHaveBeenCalled();
+      expect(tokenService.issueTokenPair).not.toHaveBeenCalled();
     });
 
     it('rejeita senha errada com 401 genérico', async () => {
@@ -279,6 +312,9 @@ describe('AuthService', () => {
         service.login('ana@example.com', 'errada', ctx),
       ).rejects.toThrow('Invalid credentials');
       expect(tokenService.issueTokenPair).not.toHaveBeenCalled();
+      // A falha não zera a contagem por conta.
+      expect(loginAttempts.consume).toHaveBeenCalledWith('ana@example.com');
+      expect(loginAttempts.succeeded).not.toHaveBeenCalled();
       expect(securityLog.warn).toHaveBeenCalledWith('login_failed', ctx, {
         userId: 'user-1',
         email: 'ana@example.com',
@@ -293,6 +329,9 @@ describe('AuthService', () => {
       await expect(
         service.login('ninguem@example.com', 'x', ctx),
       ).rejects.toThrow('Invalid credentials');
+      // Email inexistente conta do mesmo jeito (não revela a existência).
+      expect(loginAttempts.consume).toHaveBeenCalledWith('ninguem@example.com');
+      expect(loginAttempts.succeeded).not.toHaveBeenCalled();
       expect(securityLog.warn).toHaveBeenCalledWith('login_failed', ctx, {
         userId: undefined,
         email: 'ninguem@example.com',
@@ -587,6 +626,46 @@ describe('AuthService', () => {
         service.exchangeCode('a'.repeat(43), ctx),
       ).rejects.toBeInstanceOf(UnauthorizedException);
       expect(tokenService.issueTokenPair).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('logoutAll', () => {
+    it('apaga todas as sessões e os códigos de troca do usuário numa transação, e registra quantas', async () => {
+      tx.refreshToken.findMany.mockResolvedValue([
+        { familyId: 'f-web' },
+        { familyId: 'f-mobile' },
+      ]);
+
+      await service.logoutAll('user-1', ctx);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(tx.refreshToken.findMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+        distinct: ['familyId'],
+        select: { familyId: true },
+      });
+      // DELETE, nunca UPDATE de revokedAt: só o usuário, todas as famílias.
+      expect(tx.refreshToken.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+      });
+      expect(tx.oAuthExchangeCode.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+      });
+      expect(securityLog.log).toHaveBeenCalledWith('logout_all', ctx, {
+        userId: 'user-1',
+        sessionsRemoved: 2,
+      });
+    });
+
+    it('sem sessões: ainda conclui e registra zero', async () => {
+      tx.refreshToken.findMany.mockResolvedValue([]);
+
+      await service.logoutAll('user-1', ctx);
+
+      expect(securityLog.log).toHaveBeenCalledWith('logout_all', ctx, {
+        userId: 'user-1',
+        sessionsRemoved: 0,
+      });
     });
   });
 

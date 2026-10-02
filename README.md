@@ -59,6 +59,7 @@ src/
 │   ├── auth.service.ts     # casos de uso (signup, login, google, exchange)
 │   ├── token.service.ts    # emissão, rotação e revogação de JWT/refresh
 │   ├── password.service.ts # argon2
+│   ├── login-attempts.*.ts # limite de falhas de login por conta (store trocável)
 │   ├── refresh-token-transport.service.ts  # cookie (web) vs corpo (mobile)
 │   ├── oauth-state.store.ts    # state + PKCE do Google em cookie assinado
 │   ├── google-callback.ts      # códigos de ?error= do callback do Google
@@ -114,7 +115,10 @@ Variáveis principais (todas validadas no boot — ver `src/config/env.validatio
 | `SECURITY_LOG_ENABLED`                      | Log de eventos de segurança (padrão `true`; `false` no `.env.test`)               |
 | `BREACHED_PASSWORD_CHECK`                   | Checagem de senha vazada no cadastro, no HIBP (padrão `true`; `false` no `.env.test`) |
 | `BREACHED_PASSWORD_TIMEOUT_MS`              | Prazo da consulta ao HIBP (padrão `2000`, de `100` a `10000`); estourou, o cadastro segue |
+| `SCHEDULER_ENABLED`                         | Jobs agendados, como a [limpeza de tokens expirados](#limpeza-de-tokens-expirados) (padrão `true`; `false` no `.env.test`) |
 | `THROTTLE_TTL_MS` / `THROTTLE_LIMIT`        | Rate limit global (por IP)                                                        |
+| `LOGIN_MAX_FAILURES` / `LOGIN_FAILURE_WINDOW_MINUTES` | Limite de falhas de login por conta: padrão 5 falhas em 15 min (faixas 1–100 e 1–60). Ver [Rate limit e proxy](#rate-limit-e-proxy) |
+| `TRUST_PROXY`                               | `trust proxy` do Express (padrão desligado; nunca `true`/`*`). Ver [Rate limit e proxy](#rate-limit-e-proxy) |
 | `OCI_S3_ENDPOINT`                           | Endpoint S3-compatível do Object Storage (seção abaixo)                           |
 | `OCI_S3_REGION`                             | Região do bucket, ex. `sa-saopaulo-1`                                             |
 | `OCI_S3_BUCKET`                             | Bucket dos `.fit` originais, ex. `dutrail-fit-files`                              |
@@ -205,6 +209,7 @@ só é registrado fora de produção: com `NODE_ENV=production`, `/docs`,
 | POST   | `/auth/login`           | —             | obrigatório     | Login. 200 → tokens + user; 401 genérico                   |
 | POST   | `/auth/refresh`         | refresh token | obrigatório     | Novo par de tokens; o antigo é invalidado (rotação)        |
 | POST   | `/auth/logout`          | refresh token | obrigatório     | Revoga o refresh token. 204                                |
+| POST   | `/auth/logout-all`      | Bearer        | obrigatório     | Encerra todas as sessões do usuário (todos os dispositivos). 204 |
 | GET    | `/auth/google`          | —             | —               | Redireciona para o consentimento do Google                 |
 | GET    | `/auth/google/callback` | —             | —               | Retorno do Google → redirect para o frontend com `?code=` ou `?error=` |
 | POST   | `/auth/google/exchange` | código        | obrigatório     | Troca o código de uso único por tokens                     |
@@ -226,6 +231,7 @@ silencioso, porque escolher um entregaria o token pelo canal errado.
 | Corpo da resposta      | `accessToken` (+ `user`)                                                                             | `accessToken`, `refreshToken` (+ `user`) |
 | Token no canal errado  | 400                                                                                                  | 400                                      |
 | No logout              | Revoga no banco + `clearCookie`                                                                      | Revoga no banco                          |
+| No logout-all          | Apaga todas as sessões + `clearCookie`                                                               | Apaga todas as sessões                   |
 
 Rotação, detecção de reuso e revogação são **idênticas** nos dois: a única
 diferença é o transporte (`RefreshTokenTransport`). O cliente web precisa de
@@ -256,6 +262,10 @@ Formato de erro (todas as rotas, via `AllExceptionsFilter`):
    token, dentro de `REFRESH_GRACE_SECONDS`; um 401 do refresh encerra a sessão
    local.
 4. `POST /auth/logout` ao sair — web também tem o cookie apagado pela resposta.
+5. "Sair de todos os dispositivos": `POST /auth/logout-all` com o Bearer. Apaga
+   todas as sessões do usuário (web e mobile); os outros dispositivos recebem
+   401 no próximo refresh. O access token atual continua válido até expirar,
+   então o cliente o descarta e limpa o estado local.
 
 Google: abra `GET /auth/google` numa janela do browser. Após o consentimento a
 API redireciona para `FRONTEND_URL/auth/callback?code=...`; o frontend chama
@@ -285,7 +295,15 @@ ponta (login CSRF, injeção de `code`, cookie adulterado/expirado, cancelamento
 erros do Google e varredura dos logs).
 `test/refresh-token-families.e2e-spec.ts` cobre famílias, janela de
 tolerância (resposta perdida, requests concorrentes, terceiro uso, fim da
-janela simulado recuando o `rotatedAt`) e o rollback da rotação, e
+janela simulado recuando o `rotatedAt`) e o rollback da rotação.
+`test/rate-limit.e2e-spec.ts` cobre o limite de login por conta (a janela
+expira com o relógio falso), os limites por rota e o `TRUST_PROXY` com
+`X-Forwarded-For` forjado. O `resetDb()` dos e2e também esvazia as contagens
+do limite por conta, que ficam em memória.
+`test/logout-all.e2e-spec.ts` cobre o logout de todos os dispositivos
+(inclusive um token recém-rotacionado reapresentado depois dele), e
+`test/expired-tokens-cleanup.e2e-spec.ts`, a limpeza de tokens expirados e o
+registro do job conforme `SCHEDULER_ENABLED`. Por fim,
 `test/migrations.e2e-spec.ts` aplica as migrations num schema descartável e
 confere o backfill do `familyId` sobre linhas criadas antes dele.
 `test/password-normalization.e2e-spec.ts` cobre as senhas equivalentes em
@@ -397,7 +415,7 @@ herda a família. Cada linha de `RefreshToken` está num de três estados:
 | --------------- | ---------------------------------------------------- | ------------------------------------------------ |
 | Ativo           | `revokedAt` nulo                                     | Rotaciona normalmente                            |
 | Rotacionado     | `revokedAt` e `rotatedAt` preenchidos, `successorId` | Janela de tolerância ou reuso (abaixo)           |
-| Inexistente     | Apagado por logout, pelo A-01 ou pelo reuso          | 401 simples, sem efeito colateral                |
+| Inexistente     | Apagado por logout, logout-all, A-01, reuso ou limpeza | 401 simples, sem efeito colateral              |
 
 **Rotação transacional (A-17).** Numa única `$transaction`: o CAS
 (`updateMany where id e revokedAt nulo`, gravando `revokedAt` e `rotatedAt`),
@@ -415,7 +433,7 @@ não falha direto: recarrega a linha e segue a regra de token rotacionado.
    apagá-lo. Uma resposta de refresh perdida na rede móvel, ou duas abas
    renovando juntas, não derrubam ninguém. Evento `refresh_grace_used` (warn).
    Vale **uma vez** por token rotacionado.
-2. **Sucessor apagado** (logout, A-01): a sessão já tinha acabado. 401
+2. **Sucessor apagado** (logout, logout-all, A-01): a sessão já tinha acabado. 401
    simples, nada é alterado.
 3. **Reuso** (fora da janela, tolerância já usada, ou sucessor que já
    rotacionou, ou seja, o dono já recebeu e usou o token novo): o servidor
@@ -437,14 +455,56 @@ no banco, mas, com o sucessor apagado, reapresentá-lo cai no item 2.
   a janela é curta, de uso único e configurável, e `refresh_grace_used` deve
   gerar alerta (ver [Logs de segurança](#logs-de-segurança)). O par do
   atacante continua valendo enquanto ele o renovar: só cai se a família for
-  apagada (reuso detectado nela, ou o A-01). O logout do dono apaga só a linha
-  dele, não a família.
+  apagada (reuso detectado nela, o A-01 ou o logout-all). O logout do dono
+  apaga só a linha dele, não a família; para derrubar tudo, o dono usa
+  `POST /auth/logout-all`.
 - A tolerância vale uma vez por token: uma resposta perdida duas vezes
   seguidas (ou três abas renovando ao mesmo tempo) cai em reuso e encerra a
   sessão daquele dispositivo.
 - Linhas anteriores à migration `refresh_token_families` viraram uma família
   cada (sem cadeia de rotação conhecida). Uma delas já revogada que volte a
   aparecer conta como reuso e apaga só a si mesma.
+
+### Logout de todos os dispositivos
+
+`POST /auth/logout-all` (A-08) exige Bearer e `X-Client-Type`, e numa
+`$transaction` **apaga** todas as linhas de `RefreshToken` do usuário (todas as
+famílias) e os `OAuthExchangeCode` pendentes dele. No web, a resposta também
+apaga o cookie do browser que chamou. Responde 204, inclusive sem sessões
+(idempotente), e tem limite próprio (20/min por IP).
+
+Apagar, e não marcar `revokedAt`, pelo mesmo motivo do logout: apagado, um
+token reapresentado é "não encontrado" (401 simples). Uma linha só marcada
+continuaria rotacionada no banco, e o token anterior dela na família cairia na
+detecção de reuso (um `refresh_reuse_detected` falso para cada dispositivo
+deslogado).
+
+O access token é stateless: o atual e os dos outros dispositivos continuam
+valendo até expirar (`JWT_ACCESS_TTL`). Os outros dispositivos recebem 401 no
+próximo refresh. Evento `logout_all`, com a quantidade de sessões apagadas.
+
+### Limpeza de tokens expirados
+
+Um job diário (`@nestjs/schedule`, 03:00 UTC) no
+`ExpiredTokensCleanupService` apaga os `RefreshToken` e `OAuthExchangeCode`
+com `expiresAt` anterior a agora (A-12). Sem ele as tabelas cresceriam sem
+limite, guardando metadados de sessão além do necessário. Cada execução
+registra só as contagens (`refreshTokens=N exchangeCodes=N`), sem ids nem
+dados pessoais. O método `purgeExpired()` é público e devolve as contagens.
+
+Só o que expirou é apagado: um token rotacionado ainda dentro do `expiresAt`
+continua no banco, porque é ele que faz a janela de tolerância e a detecção de
+reuso funcionarem. Depois do `expiresAt` o JWT também expirou (é o mesmo
+prazo), então a linha não serve para mais nada.
+
+`SCHEDULER_ENABLED=false` não registra job nenhum (o `ScheduleModule` nem é
+importado); o `.env.test` usa `false`.
+
+> **Uma instância só.** O agendamento roda dentro do processo da API e não
+> tem lock: com mais de uma instância, cada uma executaria o job. Os DELETEs
+> são idempotentes, mas o trabalho se repetiria. Ao escalar horizontalmente,
+> deixe `SCHEDULER_ENABLED=true` em uma instância só ou adote um lock (ex.:
+> `pg_try_advisory_lock`).
 
 ### Login com Google: state, PKCE e erros
 
@@ -548,8 +608,8 @@ e2e usa um fake (`test/fakes/fake-breached-password.service.ts`).
 
 **Outros.** Guard JWT global com opt-out explícito via `@Public()`; algoritmo
 JWT fixado em HS256; `ValidationPipe` com `whitelist` + `forbidNonWhitelisted`;
-rate limit global e mais estrito em `/auth/login` e `/auth/signup` (10/min
-por IP); erros 500 nunca expõem a mensagem original; `UserResponseDto` é um
+rate limit global e limites próprios nas rotas de autenticação (ver
+[Rate limit e proxy](#rate-limit-e-proxy)); erros 500 nunca expõem a mensagem original; `UserResponseDto` é um
 mapeamento explícito (whitelist) — campos novos na tabela não vazam por
 acidente; CORS com origem explícita e `credentials: true` (exigido pelo cookie,
 e incompatível com o wildcard `*`).
@@ -585,6 +645,119 @@ das etapas: parse e checagem de duplicidade → upload → INSERT. Se o INSERT
 falhar, o objeto enviado é apagado; se até essa remoção falhar, a chave vai
 para o log. Falhas do storage viram 500 genérico, e o detalhe fica só no log.
 
+### Rate limit e proxy
+
+**Limites por IP** (`@nestjs/throttler`, um contador por rota e por IP, janela
+de 1 minuto; constantes em `src/auth/auth.controller.ts`):
+
+| Rota                                          | Limite por IP | Constante                 |
+| --------------------------------------------- | ------------- | ------------------------- |
+| `POST /auth/login`, `POST /auth/signup`       | 10/min        | `CREDENTIALS_THROTTLE`    |
+| `POST /auth/refresh`, `POST /auth/logout`     | 30/min        | `SESSION_THROTTLE`        |
+| `POST /auth/google/exchange`, `POST /auth/logout-all` | 20/min | `ACCOUNT_ACTION_THROTTLE` |
+| `POST /activities/import`                     | 20/min        | `IMPORT_THROTTLE`         |
+| Todo o resto                                  | `THROTTLE_LIMIT` por `THROTTLE_TTL_MS` (padrão 100/min) | — |
+
+O 429 traz `Retry-After` (segundos) e o corpo padrão de erro com
+`"message": "ThrottlerException: Too Many Requests"`.
+
+**Limite por conta no login** (`LoginAttemptsService`, A-03). O limite por IP
+não segura um ataque distribuído (botnet, muitos IPv6) contra uma conta. Por
+isso o login conta as falhas por email: passando de `LOGIN_MAX_FAILURES`
+(padrão 5) dentro de `LOGIN_FAILURE_WINDOW_MINUTES` (padrão 15), todo login
+daquele email responde 429, **mesmo com a senha certa**, até a janela acabar.
+
+- A chave é o SHA-256 do email normalizado (trim + minúsculas). O email nunca
+  é guardado.
+- Vale para qualquer email, exista ou não a conta (e para conta só-Google): o
+  comportamento e a resposta são os mesmos, então o 429 não revela se a conta
+  existe.
+- Contam as falhas de login (senha errada, email inexistente, conta
+  só-Google). A tentativa é contada **antes** de conferir a senha, para que
+  requests simultâneas não passem todas antes de alguma falha ser registrada.
+  Um login certo antes do limite zera a contagem.
+- A janela começa na primeira falha e não é estendida pelas tentativas
+  recusadas: o bloqueio dura no máximo uma janela.
+- O 429 é idêntico ao do limite por IP (mesmo status, corpo e `Retry-After`).
+  No log, sai como `rate_limited` com `reason: account_login_limit` e
+  `path`, sem email nem hash.
+
+**Trade-off: DoS de conta.** Quem souber o email de alguém consegue, com
+`LOGIN_MAX_FAILURES` tentativas, travar o login por senha dessa pessoa por
+até uma janela, e repetir isso a cada janela. É o preço de limitar por conta.
+A mitigação adotada é manter o limite razoável (5), a janela curta (15 min,
+teto de 60 na validação) e o 429 igual para todos, sem confirmar que a conta
+existe nem que o bloqueio é por conta. O bloqueio só afeta
+`POST /auth/login` daquele email: sessões já abertas (refresh) e o login
+com Google continuam funcionando. Para acompanhar, observe picos de
+`rate_limited` com `account_login_limit`, junto com os `login_failed` (que
+trazem o `emailMasked`) logo antes.
+
+**Storage.** As contagens do limite por conta e do throttler ficam **em
+memória**: valem por processo, zeram no restart e não são compartilhadas
+entre instâncias. O store do limite por conta não cresce sem limite: as
+janelas expiradas são removidas a cada minuto (e ao serem lidas), e com 50 mil
+chaves a mais antiga (a que expiraria primeiro) é descartada. Para rodar mais
+de uma instância, troque os dois por Redis:
+
+- limite por conta: implemente `LoginAttemptsStore`
+  (`src/auth/login-attempts.store.ts`) com `increment` = `INCR` +
+  `PEXPIRE ... NX` + `PTTL` (atômicos, num `MULTI` ou script Lua) e
+  `reset` = `DEL`, e registre a implementação no lugar da
+  `InMemoryLoginAttemptsStore` em `src/auth/auth.module.ts`;
+- throttler por IP: um `ThrottlerStorage` em Redis no `ThrottlerModule`
+  (`src/app.module.ts`).
+
+**`TRUST_PROXY`.** O IP usado pelo rate limit e pelo log de segurança é o
+`req.ip` do Express. Sem `trust proxy`, ele é o endereço de quem abriu a
+conexão TCP, e o `X-Forwarded-For` é ignorado. Atrás de um proxy reverso,
+esse endereço é o do proxy, e todos os clientes dividem o mesmo limite (10
+logins/min para o mundo inteiro). `TRUST_PROXY` diz de quem aceitar o
+`X-Forwarded-For`:
+
+| Valor                                 | Efeito                                                                                          |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| ausente, vazio ou `false` (padrão)    | Desligado: `req.ip` é o do socket                                                               |
+| `1` a `10`                            | Número de saltos (proxies) confiáveis; `req.ip` é a entrada do header nessa posição, da direita para a esquerda |
+| lista de IPs/CIDRs, separada por vírgulas | Confia só nesses endereços (IPv4/IPv6), ex. `10.0.0.5, 10.0.1.0/24`                        |
+| `loopback`, `linklocal`, `uniquelocal` | Nomes pré-definidos do Express (podem entrar na lista)                                         |
+
+`true`, `*` e faixas que cobrem todos os endereços (`0.0.0.0/0`, `::/0`,
+`::ffff:0:0/96`) são **recusados no boot**: com eles, qualquer cliente
+forjaria o `X-Forwarded-For` e escaparia do rate limit. O erro diz a variável
+e o motivo, sem o valor. Em produção sem `TRUST_PROXY`, o boot emite um warn
+lembrando disso (não falha: sem proxy, desligado é o correto).
+
+O valor certo **depende da topologia**. Confirme a topologia real da VM antes
+de definir:
+
+- nenhum proxy (a API recebe a conexão direto): **deixe desligado**. Ligado,
+  o `X-Forwarded-For` viria do próprio cliente e seria forjável;
+- um Nginx ou Caddy na mesma VM, na frente da API: `1`;
+- um load balancer na frente do Nginx: `2`.
+
+O proxy precisa acrescentar ao `X-Forwarded-For` o IP que ele viu (no Nginx,
+`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). Com o número
+de saltos certo, entradas forjadas pelo cliente à esquerda do header são
+ignoradas. Um número de saltos maior que o real volta a aceitar entradas
+forjadas.
+
+**Como validar** (depois do deploy, de fora da rede do servidor): mande um
+login com um `X-Forwarded-For` forjado e confira o `ip` no log de segurança.
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://SUA-API/auth/login \
+  -H 'Content-Type: application/json' -H 'X-Client-Type: mobile' \
+  -H 'X-Forwarded-For: 203.0.113.99' \
+  -d '{"email":"teste-proxy@example.com","password":"x"}'
+# 401; no log: {"event":"login_failed",...,"ip":"..."}
+```
+
+- `ip` é o seu IP público: correto.
+- `ip` é `203.0.113.99`: saltos demais, o header forjado está sendo aceito.
+- `ip` é o do proxy (ex. `127.0.0.1`, `10.x`): `TRUST_PROXY` desligado ou com
+  saltos de menos.
+
 ## Logs de segurança
 
 Eventos de autenticação e abuso saem como **uma linha JSON por evento**, pelo
@@ -602,6 +775,7 @@ testes.
 | `signup`                  | log             | Cadastro concluído (com email mascarado)                                                | —                                                            |
 | `signup_rejected`         | warn            | Cadastro recusado por senha vazada (com email mascarado)                                | `breached_password`                                          |
 | `breach_check_unavailable` | warn           | A API de senhas vazadas não respondeu no prazo ou respondeu com erro; o cadastro seguiu | `timeout`, `check_error`                                     |
+| `signup_conflict`         | warn            | Signup recusado com 409 (email já cadastrado). Com email mascarado e o `userId` da conta existente | —                                                            |
 | `login_success`           | log             | Login por senha                                                                         | —                                                            |
 | `login_failed`            | warn            | Login recusado (com email mascarado). O cliente recebe sempre o mesmo 401               | `unknown_email`, `no_password` (conta só-Google), `wrong_password` |
 | `refresh_success`         | log             | Rotação do refresh token (com `familyId`)                                               | —                                                            |
@@ -609,27 +783,30 @@ testes.
 | `refresh_invalid`         | warn            | Refresh recusado. O cliente recebe sempre `Invalid refresh token` (ou `Missing refresh token` sem token) | `missing_token`, `invalid_jwt`, `expired`, `not_found` (inclui o token cujo sucessor foi apagado no logout) |
 | `refresh_reuse_detected`  | warn            | Reuso de token rotacionado: **a família (sessão daquele dispositivo) foi apagada**; as outras sessões do usuário continuam. Com `familyId`. O cliente recebe o mesmo `Invalid refresh token` | —                                                            |
 | `logout`                  | log / warn      | Logout (warn só quando o token tem assinatura inválida, caso em que a resposta é 401)   | `no_token`, `not_found`, `invalid_jwt`, `expired`            |
+| `logout_all`              | log             | `POST /auth/logout-all`: todas as sessões do usuário apagadas. Com `sessionsRemoved` (quantas famílias; `0` se não havia nenhuma) | —                                                            |
 | `google_link`             | log / warn      | Conta Google vinculada a uma conta local com o mesmo email                              | `verified_account` (log), `unverified_takeover` (warn: senha e sessões descartadas, A-01) |
 | `google_exchange_success` | log             | `POST /auth/google/exchange` entregou tokens                                            | —                                                            |
 | `google_exchange_failed`  | warn            | Código de troca recusado, ou falha em `GET /auth/google/callback` (um `reason` por `?error=`) | troca: `not_found`, `used`, `expired`, `concurrent_use`; callback: `state_mismatch`, `access_denied`, `email_not_verified`, `callback_error` (= `oauth_failed`) |
-| `rate_limited`            | warn            | 429 do throttler, em qualquer rota                                                      | —                                                            |
+| `rate_limited`            | warn            | 429 do throttler por IP (qualquer rota) ou do limite de login por conta. Com `path` (a rota, sem query string) | `account_login_limit` (limite por conta; sem `reason` = limite por IP) |
 
 **Campos.** `event`, `timestamp` (ISO 8601) e, quando houver, `userId`, `ip`
 (`req.ip`), `userAgent` (truncado em 200 caracteres), `clientType`,
-`emailMasked`, `reason` e `familyId` (eventos de refresh; um uuid opaco que
-liga os eventos de uma mesma sessão, sem valor de credencial). O `reason` é
+`emailMasked`, `reason`, `familyId` (eventos de refresh; um uuid opaco que
+liga os eventos de uma mesma sessão, sem valor de credencial) e
+`sessionsRemoved` (`logout_all`) e `path` (`rate_limited`; `req.path`, sem
+query string). O `reason` é
 sempre um código fixo, garantido pelo
 tipo `SecurityReason`, e nunca texto livre nem mensagem de exceção. Campos
 ausentes não aparecem na linha.
 
-> **IP atrás de proxy.** Enquanto o `trust proxy` não for configurado (A-03),
-> `ip` é o endereço de quem abriu a conexão TCP. Atrás de um proxy ou load
-> balancer, esse é o IP do proxy, e não o do cliente.
+> **IP atrás de proxy.** `ip` é o `req.ip`. Sem `TRUST_PROXY` (o padrão), é o
+> endereço de quem abriu a conexão TCP: atrás de um proxy ou load balancer, é
+> o IP do proxy, e não o do cliente. Ver [Rate limit e proxy](#rate-limit-e-proxy).
 
 **Nunca vão para o log:** senha, tokens (access, refresh, código de troca do
 Google, `code`/`state` do callback, `code_verifier` e o cookie de state), hashes (de senha, de token, de email),
 query string de URL e email em claro. Quando é preciso identificar o email
-(`signup`, `login_failed`), ele sai mascarado (`ana@example.com` →
+(`signup`, `signup_conflict`, `login_failed`), ele sai mascarado (`ana@example.com` →
 `a***@e***.com`), e não em hash: o hash de um email é revertido por
 dicionário. O serviço recebe o email cru e faz a máscara ele mesmo, para que
 nenhum chamador esqueça. Como a linha é JSON, uma quebra de linha no
@@ -640,8 +817,9 @@ as linhas de log em busca desses valores.
 **Como os dados chegam ao log.** O controller monta um `SecurityContext`
 (`ip`, `userAgent`, `clientType`) a partir do `req` e o passa como parâmetro
 ao `AuthService` e ao `TokenService`. Não há provider request-scoped nem
-AsyncLocalStorage. O 429 acontece num guard, antes de qualquer service, e por
-isso é registrado pelo `AllExceptionsFilter`. As falhas do callback do Google
+AsyncLocalStorage. O 429 por IP acontece num guard, antes de qualquer service,
+e por isso é registrado pelo `AllExceptionsFilter`, que também registra o 429
+do limite por conta (lançado pelo `AuthService`). As falhas do callback do Google
 são registradas pelo `GoogleCallbackFilter`, que também faz o redirect.
 
 **Alertas sugeridos:**
@@ -656,15 +834,17 @@ são registradas pelo `GoogleCallbackFilter`, que também faz o redirect.
   `refresh_success` da mesma `familyId` logo antes.
 - Picos de `login_failed`, por `ip` (força bruta) ou em muitos
   `emailMasked` distintos a partir de poucos IPs (credential stuffing).
-- Picos de `rate_limited` por `ip`.
+- Picos de `rate_limited` por `ip` ou por `path`, e qualquer volume de
+  `rate_limited` com `account_login_limit` (uma conta sob ataque, ou alguém
+  travando o login dela).
+- Picos de `signup_conflict` (enumeração de contas pelo 409 do signup).
 - `google_link` com `unverified_takeover`: raro e legítimo, mas vale revisar
   (é o desfecho de uma tentativa de pre-hijacking).
 
 ## Próximos passos sugeridos
 
-- Job para apagar `RefreshToken`/`OAuthExchangeCode` expirados (hoje só acumulam).
-- `POST /auth/logout-all` (A-08), **apagando** as linhas do usuário, como o
-  A-01: um token revogado sem apagar ainda passaria pela janela de tolerância.
+- Chamar o mesmo apagamento do logout-all na troca e no reset de senha,
+  quando existirem.
 - Verificação de email e reset de senha (exigem envio de email).
 - `POST /auth/google/token` recebendo o `idToken` do Google Sign-In nativo, para
   o app Android não depender do fluxo de redirect.
@@ -672,5 +852,9 @@ são registradas pelo `GoogleCallbackFilter`, que também faz o redirect.
   apaga as atividades, mas não os objetos no storage.
 - Parse do `.fit` num worker thread, se arquivos grandes virarem rotina (~1 s
   de CPU no event loop perto do limite de 10 MiB).
-- `trust proxy` no Express quando a API for para trás de um load balancer
-  (comentado em `src/app.setup.ts`), senão o rate limit vê o IP do proxy.
+- Definir `TRUST_PROXY` quando a topologia de produção for confirmada (ver
+  [Rate limit e proxy](#rate-limit-e-proxy)).
+- Redis para as contagens do rate limit (por IP e por conta), se houver mais
+  de uma instância da API.
+- Atraso progressivo (backoff) entre falhas de login, além do limite por
+  conta.

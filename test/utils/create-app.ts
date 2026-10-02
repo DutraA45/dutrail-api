@@ -5,6 +5,10 @@ import { ActivityFileStorageService } from '../../src/activities/storage/activit
 import { AppModule } from '../../src/app.module.js';
 import { configureApp } from '../../src/app.setup.js';
 import { BreachedPasswordService } from '../../src/auth/breached-password.service.js';
+import {
+  InMemoryLoginAttemptsStore,
+  LoginAttemptsStore,
+} from '../../src/auth/login-attempts.store.js';
 import { GoogleStrategy } from '../../src/auth/strategies/google.strategy.js';
 import { PrismaService } from '../../src/prisma/prisma.service.js';
 import { FakeActivityFileStorage } from '../fakes/fake-activity-file-storage.js';
@@ -19,10 +23,14 @@ export interface TestApp {
   prisma: PrismaService;
   /** Bucket em memória no lugar do object storage real. */
   storage: FakeActivityFileStorage;
+  /** Contagens do limite de login por conta (A-03), em memória. */
+  loginAttempts: InMemoryLoginAttemptsStore;
   /**
    * Limpa todas as tabelas (CASCADE cuida das tabelas filhas de User), o
    * storage fake, que faz parte do mesmo estado persistente, e a lista de
    * senhas vazadas falsa.
+   * storage fake e as contagens de login por conta, que fazem parte do mesmo
+   * estado persistente.
    */
   resetDb(): Promise<void>;
   close(): Promise<void>;
@@ -78,15 +86,21 @@ export async function createTestApp(
   await app.init();
 
   const prisma = app.get(PrismaService);
+  const loginAttempts = app.get(LoginAttemptsStore);
+  if (!(loginAttempts instanceof InMemoryLoginAttemptsStore)) {
+    throw new Error('os e2e esperam o store de tentativas em memória');
+  }
 
   return {
     app,
     prisma,
     storage,
+    loginAttempts,
     resetDb: async () => {
       await prisma.$executeRawUnsafe('TRUNCATE TABLE "User" CASCADE');
       storage.reset();
       fakeBreachedPasswords.reset();
+      loginAttempts.clear();
     },
     close: () => app.close(),
   };

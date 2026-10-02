@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import type { AuthenticatedUser } from '../../auth/interfaces/authenticated-user.interface.js';
+import { AccountLoginLimitException } from '../../auth/login-attempts.service.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import {
   declaredClientType,
@@ -27,7 +28,8 @@ import { ErrorResponseDto } from '../dto/error-response.dto.js';
  *   log, nunca para o cliente (poderia vazar detalhes internos).
  *
  * Também é o ponto que enxerga o 429 do ThrottlerGuard (que roda antes de
- * qualquer service), por isso registra o `rate_limited`. As falhas do callback
+ * qualquer service), por isso registra o `rate_limited`, junto com o 429 do
+ * limite de login por conta (lançado pelo AuthService). As falhas do callback
  * do Google não chegam aqui: o GoogleCallbackFilter as converte em redirect.
  */
 @Catch()
@@ -52,7 +54,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
         exception instanceof Error ? exception.stack : String(exception),
       );
     }
-    this.recordSecurityEvent(request, status);
+    this.recordSecurityEvent(request, status, exception);
+
+    // O 429 do limite por conta sai igual ao do throttler por IP, que manda o
+    // Retry-After (em segundos) antes de lançar.
+    if (exception instanceof AccountLoginLimitException) {
+      response.header('Retry-After', String(exception.retryAfterSeconds));
+    }
 
     const body: ErrorResponseDto = {
       statusCode: status,
@@ -65,13 +73,25 @@ export class AllExceptionsFilter implements ExceptionFilter {
     response.status(status).json(body);
   }
 
-  private recordSecurityEvent(request: Request, status: number): void {
+  private recordSecurityEvent(
+    request: Request,
+    status: number,
+    exception: unknown,
+  ): void {
     if (status === HttpStatus.TOO_MANY_REQUESTS) {
       const user = request.user as AuthenticatedUser | undefined;
       this.securityLog.warn(
         'rate_limited',
         securityContextFrom(request, declaredClientType(request)),
-        { userId: user?.userId },
+        {
+          userId: user?.userId,
+          // `path`, sem query string (mesmo motivo do log de erro acima).
+          path: request.path,
+          reason:
+            exception instanceof AccountLoginLimitException
+              ? 'account_login_limit'
+              : undefined,
+        },
       );
     }
   }

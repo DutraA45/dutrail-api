@@ -4,6 +4,7 @@ import {
   isSwaggerPath,
   shouldSetupSwagger,
   warnAboutGoogleConfig,
+  warnAboutTrustProxy,
 } from './app.setup.js';
 import { EnvironmentVariables, NodeEnv } from './config/env.validation.js';
 
@@ -82,4 +83,49 @@ describe('warnAboutGoogleConfig', () => {
     );
     expect(warn).not.toHaveBeenCalled();
   });
+});
+
+describe('warnAboutTrustProxy', () => {
+  function configWith(values: Partial<EnvironmentVariables>) {
+    return {
+      get: (name: keyof EnvironmentVariables) => values[name],
+    } as unknown as ConfigService<EnvironmentVariables, true>;
+  }
+
+  it('em produção sem TRUST_PROXY, um warn sobre o IP do proxy, sem lançar', () => {
+    const warn = vi.fn();
+    expect(() =>
+      warnAboutTrustProxy(
+        configWith({ NODE_ENV: NodeEnv.Production, TRUST_PROXY: false }),
+        { warn } as unknown as Logger,
+      ),
+    ).not.toThrow();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/TRUST_PROXY.*IP.*proxy/);
+  });
+
+  it.each([1, ['10.0.0.5']])(
+    'em produção com TRUST_PROXY definido (%j), nada',
+    (value) => {
+      const warn = vi.fn();
+      warnAboutTrustProxy(
+        configWith({ NODE_ENV: NodeEnv.Production, TRUST_PROXY: value }),
+        { warn } as unknown as Logger,
+      );
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([NodeEnv.Development, NodeEnv.Test])(
+    'em %s, nada (sem proxy é o esperado)',
+    (nodeEnv) => {
+      const warn = vi.fn();
+      warnAboutTrustProxy(
+        configWith({ NODE_ENV: nodeEnv, TRUST_PROXY: false }),
+        { warn } as unknown as Logger,
+      );
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
 });
