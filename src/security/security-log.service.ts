@@ -5,6 +5,7 @@ import type { SecurityContext } from './security-context.js';
 
 export const SECURITY_EVENTS = [
   'signup',
+  'signup_conflict',
   'login_success',
   'login_failed',
   'refresh_success',
@@ -47,7 +48,10 @@ export type SecurityReason =
   | 'state_mismatch'
   | 'access_denied'
   | 'email_not_verified'
-  | 'callback_error';
+  | 'callback_error'
+  // rate_limited: limite de falhas de login por conta (A-03); o 429 do
+  // throttler por IP fica sem reason
+  | 'account_login_limit';
 
 export interface SecurityEventDetails {
   userId?: string;
@@ -61,6 +65,8 @@ export interface SecurityEventDetails {
   familyId?: string;
   /** logout_all: quantas sessões (famílias de refresh token) foram apagadas. */
   sessionsRemoved?: number;
+  /** rate_limited: a rota (`req.path`, sem query string). */
+  path?: string;
 }
 
 /** Uma linha do log. Campos `undefined` somem no JSON. */
@@ -75,6 +81,7 @@ export interface SecurityLogEntry {
   reason?: SecurityReason;
   familyId?: string;
   sessionsRemoved?: number;
+  path?: string;
 }
 
 export const SECURITY_LOG_CONTEXT = 'SecurityLog';
@@ -104,7 +111,8 @@ export function maskEmail(email: string): string {
  *
  * Nunca recebe senha, token, código de troca, hash nem URL: a assinatura só
  * aceita o contexto da request, o userId, o email (mascarado aqui), um motivo
- * fixo, o familyId do refresh token e a contagem de sessões do logout_all.
+ * fixo, o familyId do refresh token, a contagem de sessões do logout_all e a
+ * rota (sem query string) do rate_limited.
  * `warn` para falhas e suspeitas, `log` para sucessos.
  */
 @Injectable()
@@ -151,6 +159,7 @@ export class SecurityLogService {
       reason: details.reason,
       familyId: details.familyId,
       sessionsRemoved: details.sessionsRemoved,
+      path: details.path,
     };
   }
 }

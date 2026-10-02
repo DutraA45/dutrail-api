@@ -234,7 +234,7 @@ o "sair de todos os dispositivos" para um celular perdido ou roubado.
   `JWT_ACCESS_TTL`). Por isso o cliente deve descartá-lo e limpar o estado
   local logo após a resposta, como no logout.
 - Idempotente: sem sessões abertas, responde 204 do mesmo jeito.
-- Mesmo rate limit do login: 10 req/min por IP.
+- Rate limit próprio: 20 req/min por IP.
 
 ```http
 POST /auth/logout-all
@@ -273,7 +273,7 @@ Todo erro sai neste formato (filtro global):
 | 401    | Credenciais erradas, email inexistente, conta só-Google, access token ausente/inválido/expirado, refresh token ausente/inválido/expirado/revogado, código de troca inválido | Em request comum, tenta refresh; em `/auth/refresh`, faz logout local |
 | 404    | Token válido de um usuário que foi apagado                                                                                                                                  | Limpa a sessão local                                                  |
 | 409    | `POST /auth/signup` com email já cadastrado; `POST /activities/import` com arquivo já importado                                                                             | Mostra "email já em uso" (signup) ou "já importada" (importação)      |
-| 429    | Rate limit: 10 req/min por IP em `/auth/login`, `/auth/signup` e `/auth/logout-all`; 20 em `POST /activities/import`; 100 no resto                                         | Mostra "muitas tentativas, aguarde"                                   |
+| 429    | Rate limit por IP: 10 req/min em `/auth/login` e `/auth/signup`; 30 em `/auth/refresh` e `/auth/logout`; 20 em `/auth/google/exchange`, `/auth/logout-all` e `POST /activities/import`; 100 no resto. Também por conta, em `/auth/login` (ver abaixo) | Mostra "muitas tentativas, aguarde"; espera o `Retry-After`. Não limpa a sessão |
 
 Casos específicos do refresh token:
 
@@ -292,6 +292,22 @@ Pelo mesmo motivo, todo refresh token enviado e recusado recebe o mesmo 401
 `"Invalid refresh token"`, inclusive quando o backend detecta reuso e encerra
 a sessão daquele cliente. O motivo fica só no log do servidor. O cliente
 não tem como (nem precisa) distinguir os casos: trate como sessão encerrada.
+
+**Limite por conta no login.** Depois de **5 falhas** de login para o mesmo
+email em **15 minutos** (valores padrão do servidor), todo
+`POST /auth/login` daquele email responde **429, mesmo com a senha certa**,
+até os 15 minutos contados da primeira falha acabarem. Vale para qualquer
+email, exista ou não a conta, e a resposta é **idêntica** à do rate limit por
+IP: mesmo `statusCode`, `error`, `message`
+(`ThrottlerException: Too Many Requests`) e header `Retry-After` (segundos até
+liberar). O cliente não tem como (nem precisa) distinguir os dois casos. Um login
+certo antes do limite zera a contagem. O bloqueio não afeta sessões já
+abertas (`/auth/refresh`) nem o login com Google.
+
+Em qualquer 429: mostre "muitas tentativas, aguarde" (sem dizer que a conta
+foi bloqueada), não refaça o login automaticamente e use o `Retry-After` se
+quiser exibir o tempo de espera. Um 429 em `/auth/refresh` não é sessão
+encerrada: mantenha o refresh token e tente de novo depois.
 
 ## Login com Google
 

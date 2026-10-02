@@ -7,6 +7,10 @@ import { SecurityLogService } from '../security/security-log.service.js';
 import { UsersService } from '../users/users.service.js';
 import type { User } from '../generated/prisma/client.js';
 import { AuthService } from './auth.service.js';
+import {
+  AccountLoginLimitException,
+  LoginAttemptsService,
+} from './login-attempts.service.js';
 import { PasswordService } from './password.service.js';
 import { TokenService } from './token.service.js';
 
@@ -55,6 +59,7 @@ describe('AuthService', () => {
     oAuthExchangeCode: { deleteMany: any };
   };
   let securityLog: { log: any; warn: any };
+  let loginAttempts: { consume: any; succeeded: any };
 
   beforeEach(async () => {
     users = {
@@ -86,6 +91,10 @@ describe('AuthService', () => {
       oAuthExchangeCode: { deleteMany: vi.fn() },
     };
     securityLog = { log: vi.fn(), warn: vi.fn() };
+    loginAttempts = {
+      consume: vi.fn().mockResolvedValue(undefined),
+      succeeded: vi.fn().mockResolvedValue(undefined),
+    };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -95,6 +104,7 @@ describe('AuthService', () => {
         { provide: TokenService, useValue: tokenService },
         { provide: PrismaService, useValue: prisma },
         { provide: SecurityLogService, useValue: securityLog },
+        { provide: LoginAttemptsService, useValue: loginAttempts },
       ],
     }).compile();
 
@@ -140,6 +150,12 @@ describe('AuthService', () => {
         service.signup('ana@example.com', 'S3nh@Forte!', undefined, ctx),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(users.create).not.toHaveBeenCalled();
+      // Sem texto livre: só o userId da conta existente e o email (mascarado
+      // pelo serviço de log).
+      expect(securityLog.warn).toHaveBeenCalledWith('signup_conflict', ctx, {
+        userId: 'user-1',
+        email: 'ana@example.com',
+      });
     });
   });
 
@@ -159,6 +175,22 @@ describe('AuthService', () => {
       expect(securityLog.log).toHaveBeenCalledWith('login_success', ctx, {
         userId: 'user-1',
       });
+      expect(loginAttempts.consume).toHaveBeenCalledWith('ana@example.com');
+      expect(loginAttempts.succeeded).toHaveBeenCalledWith('ana@example.com');
+    });
+
+    it('com o limite por conta atingido, responde 429 sem consultar a conta nem a senha', async () => {
+      loginAttempts.consume.mockRejectedValue(
+        new AccountLoginLimitException(60),
+      );
+
+      await expect(
+        service.login('ana@example.com', 'S3nh@Forte!', ctx),
+      ).rejects.toBeInstanceOf(AccountLoginLimitException);
+      expect(users.findByEmail).not.toHaveBeenCalled();
+      expect(password.verify).not.toHaveBeenCalled();
+      expect(loginAttempts.succeeded).not.toHaveBeenCalled();
+      expect(tokenService.issueTokenPair).not.toHaveBeenCalled();
     });
 
     it('rejeita senha errada com 401 genérico', async () => {
@@ -169,6 +201,9 @@ describe('AuthService', () => {
         service.login('ana@example.com', 'errada', ctx),
       ).rejects.toThrow('Invalid credentials');
       expect(tokenService.issueTokenPair).not.toHaveBeenCalled();
+      // A falha não zera a contagem por conta.
+      expect(loginAttempts.consume).toHaveBeenCalledWith('ana@example.com');
+      expect(loginAttempts.succeeded).not.toHaveBeenCalled();
       expect(securityLog.warn).toHaveBeenCalledWith('login_failed', ctx, {
         userId: 'user-1',
         email: 'ana@example.com',
@@ -183,6 +218,9 @@ describe('AuthService', () => {
       await expect(
         service.login('ninguem@example.com', 'x', ctx),
       ).rejects.toThrow('Invalid credentials');
+      // Email inexistente conta do mesmo jeito (não revela a existência).
+      expect(loginAttempts.consume).toHaveBeenCalledWith('ninguem@example.com');
+      expect(loginAttempts.succeeded).not.toHaveBeenCalled();
       expect(securityLog.warn).toHaveBeenCalledWith('login_failed', ctx, {
         userId: undefined,
         email: 'ninguem@example.com',

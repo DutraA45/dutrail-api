@@ -566,10 +566,39 @@ describe('Log de segurança (e2e)', () => {
     });
     expect(families.length).toBeGreaterThan(0);
 
+    // Cadastro repetido (409) e o limite de login por conta (A-03): a senha
+    // certa recebe 429 depois de LOGIN_MAX_FAILURES falhas. A chave do limite
+    // (SHA-256 do email) já está entre os segredos.
+    await post('/auth/signup').send(credentials).expect(409);
+    const conflict = expectEvent(logs, {
+      event: 'signup_conflict',
+      level: 'warn',
+      userId: signupUser.id,
+      emailMasked: 'a***@e***.com',
+    });
+    expect(conflict.reason).toBeUndefined();
+    for (let i = 0; i < 5; i++) {
+      await post('/auth/login')
+        .send({ email: credentials.email, password: WRONG_PASSWORD })
+        .expect(401);
+    }
+    await post('/auth/login')
+      .send({ email: credentials.email, password: credentials.password })
+      .expect(429);
+    const accountLimit = expectEvent(logs, {
+      event: 'rate_limited',
+      level: 'warn',
+      reason: 'account_login_limit',
+      path: '/auth/login',
+    });
+    expect(accountLimit.emailMasked).toBeUndefined();
+
     // O fluxo emitiu de fato os eventos esperados...
     const emitted = new Set(logs.events().map((e) => e.event));
     for (const event of [
       'signup',
+      'signup_conflict',
+      'rate_limited',
       'login_failed',
       'login_success',
       'refresh_success',
@@ -632,20 +661,24 @@ describe('Log de segurança: rate limit (e2e)', () => {
     vi.unstubAllEnvs();
   });
 
-  it('o 429 do throttler vira rate_limited', async () => {
-    const login = () =>
+  it('o 429 do throttler vira rate_limited, com a rota', async () => {
+    // Um email por tentativa: o limite aqui é o por IP, não o por conta.
+    const login = (i: number) =>
       request(t.app.getHttpServer())
-        .post('/auth/login')
+        .post('/auth/login?origem=e2e')
         .set('X-Client-Type', 'mobile')
         .set('User-Agent', USER_AGENT)
-        .send({ email: 'x@example.com', password: 'qualquer1' });
+        .send({ email: `x${i}@example.com`, password: 'qualquer1' });
 
     for (let i = 0; i < 10; i++) {
-      await login().expect(401);
+      await login(i).expect(401);
     }
-    const res = await login().expect(429);
+    const res = await login(10).expect(429);
     // A resposta ao cliente é a mesma de antes.
-    expect(res.body).toMatchObject({ statusCode: 429, path: '/auth/login' });
+    expect(res.body).toMatchObject({
+      statusCode: 429,
+      path: '/auth/login?origem=e2e',
+    });
 
     const limited = logs.events().filter((e) => e.event === 'rate_limited');
     expect(limited).toHaveLength(1);
@@ -653,7 +686,12 @@ describe('Log de segurança: rate limit (e2e)', () => {
       level: 'warn',
       clientType: 'mobile',
       userAgent: USER_AGENT,
+      // Só o path: a query string não chega ao log.
+      path: '/auth/login',
     });
+    // Sem reason: é o limite por IP, não o por conta.
+    expect(limited[0].reason).toBeUndefined();
+    expect(JSON.stringify(limited[0])).not.toContain('origem');
     expect(limited[0].ip).toMatch(/127\.0\.0\.1|::1/);
     expect(
       logs.events().filter((e) => e.event === 'login_failed'),

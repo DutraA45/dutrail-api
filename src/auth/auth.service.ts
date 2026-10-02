@@ -11,6 +11,7 @@ import { UsersService } from '../users/users.service.js';
 import type { User } from '../generated/prisma/client.js';
 import { GoogleEmailNotVerifiedException } from './google-callback.js';
 import type { GoogleProfile } from './interfaces/google-profile.interface.js';
+import { LoginAttemptsService } from './login-attempts.service.js';
 import { PasswordService } from './password.service.js';
 import { TokenService, type TokenPair } from './token.service.js';
 
@@ -40,6 +41,7 @@ export class AuthService {
     private readonly tokenService: TokenService,
     private readonly prisma: PrismaService,
     private readonly securityLog: SecurityLogService,
+    private readonly loginAttempts: LoginAttemptsService,
   ) {}
 
   async signup(
@@ -52,7 +54,12 @@ export class AuthService {
     if (existing) {
       // 409 explícito. Trade-off: revela que o email existe, mas o fluxo de
       // cadastro precisa disso para ser utilizável (o alternativo — "enviamos
-      // um email" — exige infra de email, fora do escopo desta etapa).
+      // um email" — exige infra de email, fora do escopo desta etapa). Por
+      // isso fica no log: muitos 409 seguidos são enumeração de contas.
+      this.securityLog.warn('signup_conflict', ctx, {
+        userId: existing.id,
+        email,
+      });
       throw new ConflictException('Email already registered');
     }
 
@@ -68,6 +75,10 @@ export class AuthService {
     password: string,
     ctx: SecurityContext,
   ): Promise<AuthResult> {
+    // Limite por conta (A-03): conta a tentativa antes de qualquer consulta,
+    // exista ou não a conta, e responde 429 se o limite já foi atingido.
+    await this.loginAttempts.consume(email);
+
     const user = await this.usersService.findByEmail(email);
 
     // Conta inexistente OU conta só-Google (sem senha): mesma resposta.
@@ -76,6 +87,7 @@ export class AuthService {
 
     if (!user || !user.passwordHash || !passwordOk) {
       // O motivo distingue os casos só no log; o cliente recebe o mesmo 401.
+      // A tentativa já contada fica valendo como falha.
       this.securityLog.warn('login_failed', ctx, {
         userId: user?.id,
         email,
@@ -88,6 +100,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    await this.loginAttempts.succeeded(email);
     const tokens = await this.tokenService.issueTokenPair(user);
     this.securityLog.log('login_success', ctx, { userId: user.id });
     return { ...tokens, user };

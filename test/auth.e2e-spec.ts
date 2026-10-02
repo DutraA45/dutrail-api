@@ -903,17 +903,17 @@ describe('Rate limiting (e2e)', () => {
   });
 
   it('bloqueia o login com 429 após 10 tentativas por minuto', async () => {
-    const body = { email: 'x@example.com', password: 'qualquer1' };
-    const post = () =>
+    // Um email por tentativa: o limite aqui é o por IP, não o por conta.
+    const post = (i: number) =>
       request(t.app.getHttpServer())
         .post('/auth/login')
         .set('X-Client-Type', 'mobile')
-        .send(body);
+        .send({ email: `x${i}@example.com`, password: 'qualquer1' });
 
     for (let i = 0; i < 10; i++) {
-      await post().expect(401);
+      await post(i).expect(401);
     }
-    const res = await post().expect(429);
+    const res = await post(10).expect(429);
     expect(res.body).toMatchObject({ statusCode: 429, path: '/auth/login' });
     expect(res.body.message).toMatch(/too many requests/i);
   });

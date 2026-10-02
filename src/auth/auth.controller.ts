@@ -61,12 +61,34 @@ import type { AuthenticatedUser } from './interfaces/authenticated-user.interfac
 import { RefreshTokenTransport } from './refresh-token-transport.service.js';
 
 /**
- * Limite mais apertado para rotas que aceitam credenciais (força bruta,
- * "credential stuffing") e para o logout-all (cada chamada apaga todas as
- * sessões do usuário). O limite global (THROTTLE_*) continua valendo para o
- * resto da API.
+ * Limites por IP próprios das rotas de autenticação (A-03), abaixo do global
+ * (THROTTLE_*), que continua valendo para o resto da API. Cada rota tem o seu
+ * contador.
+ *
+ * Login e signup aceitam senha (força bruta, credential stuffing); o login
+ * ainda tem o limite por conta (LoginAttemptsService).
  */
-const CREDENTIALS_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
+export const CREDENTIALS_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
+
+/**
+ * Refresh e logout: chamados pelo cliente sem ação do usuário (o refresh a
+ * cada expiração do access token, às vezes por várias abas), então o limite é
+ * mais folgado. Ainda assim fica abaixo do global: cada chamada verifica um
+ * JWT e escreve no banco.
+ */
+export const SESSION_THROTTLE = { default: { limit: 30, ttl: 60_000 } };
+
+/**
+ * Troca do código do Google (credencial de uso único) e logout-all (cada
+ * chamada apaga todas as sessões do usuário): uso raro e legítimo, custo de
+ * banco por chamada.
+ */
+export const ACCOUNT_ACTION_THROTTLE = { default: { limit: 20, ttl: 60_000 } };
+
+const TOO_MANY_REQUESTS = {
+  description: 'Rate limit excedido',
+  type: ErrorResponseDto,
+};
 
 const CLIENT_TYPE_ERROR =
   'Body inválido ou header X-Client-Type ausente/inválido';
@@ -105,10 +127,7 @@ export class AuthController {
     description: 'Email já cadastrado',
     type: ErrorResponseDto,
   })
-  @ApiTooManyRequestsResponse({
-    description: 'Rate limit excedido',
-    type: ErrorResponseDto,
-  })
+  @ApiTooManyRequestsResponse(TOO_MANY_REQUESTS)
   async signup(
     @Body() dto: SignupDto,
     @ClientType() clientType: ClientType,
@@ -140,7 +159,10 @@ export class AuthController {
     type: ErrorResponseDto,
   })
   @ApiTooManyRequestsResponse({
-    description: 'Rate limit excedido',
+    description:
+      'Rate limit excedido: por IP (10/min) ou por conta (LOGIN_MAX_FAILURES falhas para o ' +
+      'mesmo email em LOGIN_FAILURE_WINDOW_MINUTES; vale até a senha certa, até a janela ' +
+      'acabar). As duas respostas são iguais, exista ou não a conta.',
     type: ErrorResponseDto,
   })
   async login(
@@ -160,6 +182,7 @@ export class AuthController {
   @Public()
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
+  @Throttle(SESSION_THROTTLE)
   @ApiClientTypeHeader()
   @ApiOperation({
     summary: 'Troca um refresh token por um novo par de tokens',
@@ -178,6 +201,7 @@ export class AuthController {
     description: 'Refresh token ausente, inválido, expirado ou revogado',
     type: ErrorResponseDto,
   })
+  @ApiTooManyRequestsResponse(TOO_MANY_REQUESTS)
   async refresh(
     @Body() dto: RefreshTokenDto,
     @ClientType() clientType: ClientType,
@@ -206,6 +230,7 @@ export class AuthController {
   @Public()
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @Throttle(SESSION_THROTTLE)
   @ApiClientTypeHeader()
   @ApiOperation({
     summary: 'Invalida o refresh token atual',
@@ -224,6 +249,7 @@ export class AuthController {
     description: 'Refresh token com assinatura inválida',
     type: ErrorResponseDto,
   })
+  @ApiTooManyRequestsResponse(TOO_MANY_REQUESTS)
   async logout(
     @Body() dto: RefreshTokenDto,
     @ClientType() clientType: ClientType,
@@ -250,7 +276,7 @@ export class AuthController {
    */
   @Post('logout-all')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @Throttle(CREDENTIALS_THROTTLE)
+  @Throttle(ACCOUNT_ACTION_THROTTLE)
   @ApiBearerAuth()
   @ApiClientTypeHeader()
   @ApiOperation({
@@ -273,10 +299,7 @@ export class AuthController {
     description: 'Access token ausente, inválido ou expirado',
     type: ErrorResponseDto,
   })
-  @ApiTooManyRequestsResponse({
-    description: 'Rate limit excedido',
-    type: ErrorResponseDto,
-  })
+  @ApiTooManyRequestsResponse(TOO_MANY_REQUESTS)
   async logoutAll(
     @CurrentUser() current: AuthenticatedUser,
     @ClientType() clientType: ClientType,
@@ -349,6 +372,7 @@ export class AuthController {
   @Public()
   @Post('google/exchange')
   @HttpCode(HttpStatus.OK)
+  @Throttle(ACCOUNT_ACTION_THROTTLE)
   @ApiClientTypeHeader()
   @ApiOperation({ summary: 'Troca o código do callback do Google por tokens' })
   @ApiAuthResponse(HttpStatus.OK)
@@ -360,6 +384,7 @@ export class AuthController {
     description: 'Código inválido, expirado ou já usado',
     type: ErrorResponseDto,
   })
+  @ApiTooManyRequestsResponse(TOO_MANY_REQUESTS)
   async googleExchange(
     @Body() dto: ExchangeCodeDto,
     @ClientType() clientType: ClientType,

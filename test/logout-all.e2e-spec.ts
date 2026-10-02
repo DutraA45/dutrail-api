@@ -347,7 +347,7 @@ describe('POST /auth/logout-all: rate limit (e2e)', () => {
     vi.unstubAllEnvs();
   });
 
-  it('segue o limite estrito das rotas de auth: 429 após 10 por minuto', async () => {
+  it('tem limite próprio: 429 após 20 por minuto', async () => {
     const signup = await request(t.app.getHttpServer())
       .post('/auth/signup')
       .set('X-Client-Type', 'mobile')
@@ -359,7 +359,7 @@ describe('POST /auth/logout-all: rate limit (e2e)', () => {
         .set('X-Client-Type', 'mobile')
         .set('Authorization', `Bearer ${signup.body.accessToken}`);
 
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 20; i++) {
       await post().expect(204);
     }
     const res = await post().expect(429);

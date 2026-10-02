@@ -25,6 +25,7 @@ export interface SecurityLine {
   reason?: string;
   familyId?: string;
   sessionsRemoved?: number;
+  path?: string;
 }
 
 const LEVELS = ['log', 'warn', 'error', 'debug', 'verbose', 'fatal'] as const;
