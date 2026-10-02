@@ -14,9 +14,8 @@ import type { User } from '../generated/prisma/client.js';
 import { BreachedPasswordService } from './breached-password.service.js';
 import { GoogleEmailNotVerifiedException } from './google-callback.js';
 import type { GoogleProfile } from './interfaces/google-profile.interface.js';
-import { PASSWORD_MAX_LENGTH, PasswordService } from './password.service.js';
 import { LoginAttemptsService } from './login-attempts.service.js';
-import { PasswordService } from './password.service.js';
+import { PASSWORD_MAX_LENGTH, PasswordService } from './password.service.js';
 import { TokenService, type TokenPair } from './token.service.js';
 
 export interface AuthResult extends TokenPair {

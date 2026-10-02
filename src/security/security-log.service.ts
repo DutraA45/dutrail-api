@@ -56,7 +56,7 @@ export type SecurityReason =
   // breach_check_unavailable (A-09): a API de senhas vazadas não respondeu
   // no prazo, ou respondeu algo inesperado; o cadastro seguiu
   | 'timeout'
-  | 'check_error';
+  | 'check_error'
   // rate_limited: limite de falhas de login por conta (A-03); o 429 do
   // throttler por IP fica sem reason
   | 'account_login_limit';

@@ -208,16 +208,6 @@ describe('validateEnv', () => {
     it('o .env.example liga e o .env.test desliga (sem rede nos testes)', () => {
       expect(validateEnv(exampleEnv).BREACHED_PASSWORD_CHECK).toBe(true);
       expect(validateEnv(testEnv).BREACHED_PASSWORD_CHECK).toBe(false);
-  describe('SCHEDULER_ENABLED', () => {
-    const { SCHEDULER_ENABLED: _omitted, ...withoutFlag } = exampleEnv;
-
-    it('é true por padrão (variável ausente)', () => {
-      expect(validateEnv(withoutFlag).SCHEDULER_ENABLED).toBe(true);
-    });
-
-    it('o .env.example liga e o .env.test desliga', () => {
-      expect(validateEnv(exampleEnv).SCHEDULER_ENABLED).toBe(true);
-      expect(validateEnv(testEnv).SCHEDULER_ENABLED).toBe(false);
     });
 
     it.each(['yes', '0', ''])('recusa "%s": só true ou false', (value) => {
@@ -247,6 +237,22 @@ describe('validateEnv', () => {
         ).toMatch(/BREACHED_PASSWORD_TIMEOUT_MS deve ser/);
       },
     );
+  });
+
+  describe('SCHEDULER_ENABLED', () => {
+    const { SCHEDULER_ENABLED: _omitted, ...withoutFlag } = exampleEnv;
+
+    it('é true por padrão (variável ausente)', () => {
+      expect(validateEnv(withoutFlag).SCHEDULER_ENABLED).toBe(true);
+    });
+
+    it('o .env.example liga e o .env.test desliga', () => {
+      expect(validateEnv(exampleEnv).SCHEDULER_ENABLED).toBe(true);
+      expect(validateEnv(testEnv).SCHEDULER_ENABLED).toBe(false);
+    });
+
+    it.each(['yes', '0', ''])('recusa "%s": só true ou false', (value) => {
+      expect(
         validationMessage({ ...exampleEnv, SCHEDULER_ENABLED: value }),
       ).toMatch(/SCHEDULER_ENABLED deve ser "true" ou "false"/);
     });

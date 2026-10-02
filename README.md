@@ -303,15 +303,15 @@ do limite por conta, que ficam em memória.
 `test/logout-all.e2e-spec.ts` cobre o logout de todos os dispositivos
 (inclusive um token recém-rotacionado reapresentado depois dele), e
 `test/expired-tokens-cleanup.e2e-spec.ts`, a limpeza de tokens expirados e o
-registro do job conforme `SCHEDULER_ENABLED`. Por fim,
-`test/migrations.e2e-spec.ts` aplica as migrations num schema descartável e
-confere o backfill do `familyId` sobre linhas criadas antes dele.
+registro do job conforme `SCHEDULER_ENABLED`.
 `test/password-normalization.e2e-spec.ts` cobre as senhas equivalentes em
 NFKC, o rehash de um hash legado, o teto depois da normalização, o mesmo 401
 (e o mesmo número de argon2) para email inexistente e senha errada, e o
 access token sem email. `test/breached-password.e2e-spec.ts` cobre a senha
 vazada no cadastro (com o fake), a API indisponível, o login sem checagem e,
-com o `fetch` simulado, o service real ligado e desligado pelo env.
+com o `fetch` simulado, o service real ligado e desligado pelo env. Por fim,
+`test/migrations.e2e-spec.ts` aplica as migrations num schema descartável e
+confere o backfill do `familyId` sobre linhas criadas antes dele.
 O storage dos `.fit` também é um fake em memória, o que permite simular falha
 do provedor. O fixture `test/fixtures/running.fit` é sintético, gerado pelo
 Encoder da Garmin, e não contém GPS. Para regenerá-lo, rode

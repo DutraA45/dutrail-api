@@ -27,10 +27,8 @@ export interface TestApp {
   loginAttempts: InMemoryLoginAttemptsStore;
   /**
    * Limpa todas as tabelas (CASCADE cuida das tabelas filhas de User), o
-   * storage fake, que faz parte do mesmo estado persistente, e a lista de
-   * senhas vazadas falsa.
    * storage fake e as contagens de login por conta, que fazem parte do mesmo
-   * estado persistente.
+   * estado persistente, e a lista de senhas vazadas falsa.
    */
   resetDb(): Promise<void>;
   close(): Promise<void>;

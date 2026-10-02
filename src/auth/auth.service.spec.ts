@@ -12,7 +12,6 @@ import { UsersService } from '../users/users.service.js';
 import type { User } from '../generated/prisma/client.js';
 import { AuthService, BREACHED_PASSWORD_MESSAGE } from './auth.service.js';
 import { BreachedPasswordService } from './breached-password.service.js';
-import { AuthService } from './auth.service.js';
 import {
   AccountLoginLimitException,
   LoginAttemptsService,
@@ -164,6 +163,12 @@ describe('AuthService', () => {
         service.signup('ana@example.com', 'S3nh@Forte!', undefined, ctx),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(users.create).not.toHaveBeenCalled();
+      // Sem texto livre: só o userId da conta existente e o email (mascarado
+      // pelo serviço de log).
+      expect(securityLog.warn).toHaveBeenCalledWith('signup_conflict', ctx, {
+        userId: 'user-1',
+        email: 'ana@example.com',
+      });
       // Nada vai à rede para um cadastro que já seria recusado.
       expect(breached.check).not.toHaveBeenCalled();
     });
@@ -259,12 +264,6 @@ describe('AuthService', () => {
       await service.signup('ana@example.com', '㍿'.repeat(32), undefined, ctx);
 
       expect(password.hash).toHaveBeenCalledWith('㍿'.repeat(32));
-      // Sem texto livre: só o userId da conta existente e o email (mascarado
-      // pelo serviço de log).
-      expect(securityLog.warn).toHaveBeenCalledWith('signup_conflict', ctx, {
-        userId: 'user-1',
-        email: 'ana@example.com',
-      });
     });
   });
 
