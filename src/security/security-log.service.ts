@@ -5,6 +5,8 @@ import type { SecurityContext } from './security-context.js';
 
 export const SECURITY_EVENTS = [
   'signup',
+  'signup_rejected',
+  'breach_check_unavailable',
   'signup_conflict',
   'login_success',
   'login_failed',
@@ -49,6 +51,12 @@ export type SecurityReason =
   | 'access_denied'
   | 'email_not_verified'
   | 'callback_error'
+  // signup_rejected (A-09)
+  | 'breached_password'
+  // breach_check_unavailable (A-09): a API de senhas vazadas não respondeu
+  // no prazo, ou respondeu algo inesperado; o cadastro seguiu
+  | 'timeout'
+  | 'check_error'
   // rate_limited: limite de falhas de login por conta (A-03); o 429 do
   // throttler por IP fica sem reason
   | 'account_login_limit';

@@ -191,6 +191,54 @@ describe('validateEnv', () => {
     });
   });
 
+  describe('BREACHED_PASSWORD_CHECK e BREACHED_PASSWORD_TIMEOUT_MS', () => {
+    const {
+      BREACHED_PASSWORD_CHECK: _check,
+      BREACHED_PASSWORD_TIMEOUT_MS: _timeout,
+      ...withoutBreach
+    } = exampleEnv;
+
+    it('ligada por padrão, com 2000 ms (variáveis ausentes)', () => {
+      expect(validateEnv(withoutBreach)).toMatchObject({
+        BREACHED_PASSWORD_CHECK: true,
+        BREACHED_PASSWORD_TIMEOUT_MS: 2000,
+      });
+    });
+
+    it('o .env.example liga e o .env.test desliga (sem rede nos testes)', () => {
+      expect(validateEnv(exampleEnv).BREACHED_PASSWORD_CHECK).toBe(true);
+      expect(validateEnv(testEnv).BREACHED_PASSWORD_CHECK).toBe(false);
+    });
+
+    it.each(['yes', '0', ''])('recusa "%s": só true ou false', (value) => {
+      expect(
+        validationMessage({ ...exampleEnv, BREACHED_PASSWORD_CHECK: value }),
+      ).toMatch(/BREACHED_PASSWORD_CHECK deve ser "true" ou "false"/);
+    });
+
+    it.each([
+      ['100', 100],
+      ['10000', 10_000],
+    ])('aceita timeout de %s ms', (value, expected) => {
+      expect(
+        validateEnv({ ...exampleEnv, BREACHED_PASSWORD_TIMEOUT_MS: value })
+          .BREACHED_PASSWORD_TIMEOUT_MS,
+      ).toBe(expected);
+    });
+
+    it.each(['99', '10001', '1.5', 'abc', ''])(
+      'recusa timeout "%s"',
+      (value) => {
+        expect(
+          validationMessage({
+            ...exampleEnv,
+            BREACHED_PASSWORD_TIMEOUT_MS: value,
+          }),
+        ).toMatch(/BREACHED_PASSWORD_TIMEOUT_MS deve ser/);
+      },
+    );
+  });
+
   describe('SCHEDULER_ENABLED', () => {
     const { SCHEDULER_ENABLED: _omitted, ...withoutFlag } = exampleEnv;
 

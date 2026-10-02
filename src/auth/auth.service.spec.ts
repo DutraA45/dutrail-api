@@ -1,4 +1,8 @@
-import { ConflictException, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -6,7 +10,8 @@ import type { SecurityContext } from '../security/security-context.js';
 import { SecurityLogService } from '../security/security-log.service.js';
 import { UsersService } from '../users/users.service.js';
 import type { User } from '../generated/prisma/client.js';
-import { AuthService } from './auth.service.js';
+import { AuthService, BREACHED_PASSWORD_MESSAGE } from './auth.service.js';
+import { BreachedPasswordService } from './breached-password.service.js';
 import {
   AccountLoginLimitException,
   LoginAttemptsService,
@@ -15,6 +20,9 @@ import { PasswordService } from './password.service.js';
 import { TokenService } from './token.service.js';
 
 const tokens = { accessToken: 'access', refreshToken: 'refresh' };
+const MATCH = { valid: true, needsRehash: false };
+const LEGACY_MATCH = { valid: true, needsRehash: true };
+const MISMATCH = { valid: false };
 const ctx: SecurityContext = {
   ip: '203.0.113.7',
   userAgent: 'vitest',
@@ -51,6 +59,7 @@ describe('AuthService', () => {
     revokeRefreshToken: any;
   };
   let prisma: {
+    user: { updateMany: any };
     oAuthExchangeCode: { create: any; findUnique: any; updateMany: any };
     $transaction: any;
   };
@@ -59,6 +68,7 @@ describe('AuthService', () => {
     oAuthExchangeCode: { deleteMany: any };
   };
   let securityLog: { log: any; warn: any };
+  let breached: { check: any };
   let loginAttempts: { consume: any; succeeded: any };
 
   beforeEach(async () => {
@@ -78,6 +88,7 @@ describe('AuthService', () => {
       revokeRefreshToken: vi.fn(),
     };
     prisma = {
+      user: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
       oAuthExchangeCode: {
         create: vi.fn(),
         findUnique: vi.fn(),
@@ -91,6 +102,7 @@ describe('AuthService', () => {
       oAuthExchangeCode: { deleteMany: vi.fn() },
     };
     securityLog = { log: vi.fn(), warn: vi.fn() };
+    breached = { check: vi.fn().mockResolvedValue('clean') };
     loginAttempts = {
       consume: vi.fn().mockResolvedValue(undefined),
       succeeded: vi.fn().mockResolvedValue(undefined),
@@ -104,6 +116,7 @@ describe('AuthService', () => {
         { provide: TokenService, useValue: tokenService },
         { provide: PrismaService, useValue: prisma },
         { provide: SecurityLogService, useValue: securityLog },
+        { provide: BreachedPasswordService, useValue: breached },
         { provide: LoginAttemptsService, useValue: loginAttempts },
       ],
     }).compile();
@@ -156,6 +169,101 @@ describe('AuthService', () => {
         userId: 'user-1',
         email: 'ana@example.com',
       });
+      // Nada vai à rede para um cadastro que já seria recusado.
+      expect(breached.check).not.toHaveBeenCalled();
+    });
+
+    it('consulta a senha recebida na lista de vazadas antes do hash', async () => {
+      users.findByEmail.mockResolvedValue(null);
+      users.create.mockResolvedValue(makeUser());
+
+      await service.signup('ana@example.com', 'S3nh@Forte!', undefined, ctx);
+
+      expect(breached.check).toHaveBeenCalledWith('S3nh@Forte!');
+      expect(breached.check.mock.invocationCallOrder[0]).toBeLessThan(
+        password.hash.mock.invocationCallOrder[0],
+      );
+      expect(securityLog.warn).not.toHaveBeenCalled();
+    });
+
+    it('rejeita com 400 a senha vazada, sem hash nem usuário, e registra o motivo', async () => {
+      users.findByEmail.mockResolvedValue(null);
+      breached.check.mockResolvedValue('breached');
+
+      const err: unknown = await service
+        .signup('ana@example.com', 'password123', undefined, ctx)
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).getResponse()).toMatchObject({
+        message: [BREACHED_PASSWORD_MESSAGE],
+      });
+      expect(password.hash).not.toHaveBeenCalled();
+      expect(users.create).not.toHaveBeenCalled();
+      expect(tokenService.issueTokenPair).not.toHaveBeenCalled();
+      expect(securityLog.warn).toHaveBeenCalledWith('signup_rejected', ctx, {
+        email: 'ana@example.com',
+        reason: 'breached_password',
+      });
+    });
+
+    it.each([
+      ['timeout', 'timeout'],
+      ['error', 'check_error'],
+    ] as const)(
+      'API de vazadas indisponível (%s): o cadastro segue, com warn no log',
+      async (result, reason) => {
+        users.findByEmail.mockResolvedValue(null);
+        users.create.mockResolvedValue(makeUser());
+        breached.check.mockResolvedValue(result);
+
+        await expect(
+          service.signup('ana@example.com', 'S3nh@Forte!', undefined, ctx),
+        ).resolves.toMatchObject({ user: { id: 'user-1' } });
+        expect(securityLog.warn).toHaveBeenCalledWith(
+          'breach_check_unavailable',
+          ctx,
+          { reason },
+        );
+      },
+    );
+
+    it('checagem desligada: o cadastro segue sem log', async () => {
+      users.findByEmail.mockResolvedValue(null);
+      users.create.mockResolvedValue(makeUser());
+      breached.check.mockResolvedValue('disabled');
+
+      await service.signup('ana@example.com', 'S3nh@Forte!', undefined, ctx);
+
+      expect(users.create).toHaveBeenCalled();
+      expect(securityLog.warn).not.toHaveBeenCalled();
+    });
+
+    it('rejeita com 400 a senha que passa de 128 caracteres depois do NFKC (A-09)', async () => {
+      // 64 caracteres na entrada (cabe no DTO); "㍿" vira "株式会社" no NFKC.
+      const expands = '㍿'.repeat(64);
+      expect(expands.normalize('NFKC')).toHaveLength(256);
+
+      const err: unknown = await service
+        .signup('ana@example.com', expands, undefined, ctx)
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).getResponse()).toMatchObject({
+        message: [expect.stringContaining('after Unicode normalization')],
+      });
+      expect(users.findByEmail).not.toHaveBeenCalled();
+      expect(breached.check).not.toHaveBeenCalled();
+      expect(password.hash).not.toHaveBeenCalled();
+    });
+
+    it('aceita exatamente 128 caracteres depois do NFKC', async () => {
+      users.findByEmail.mockResolvedValue(null);
+      users.create.mockResolvedValue(makeUser());
+
+      await service.signup('ana@example.com', '㍿'.repeat(32), undefined, ctx);
+
+      expect(password.hash).toHaveBeenCalledWith('㍿'.repeat(32));
     });
   });
 
@@ -163,7 +271,7 @@ describe('AuthService', () => {
     it('devolve tokens quando a senha confere', async () => {
       const user = makeUser();
       users.findByEmail.mockResolvedValue(user);
-      password.verify.mockResolvedValue(true);
+      password.verify.mockResolvedValue(MATCH);
 
       const result = await service.login('ana@example.com', 'S3nh@Forte!', ctx);
 
@@ -175,6 +283,8 @@ describe('AuthService', () => {
       expect(securityLog.log).toHaveBeenCalledWith('login_success', ctx, {
         userId: 'user-1',
       });
+      // A lista de vazadas só é consultada quando a senha é definida.
+      expect(breached.check).not.toHaveBeenCalled();
       expect(loginAttempts.consume).toHaveBeenCalledWith('ana@example.com');
       expect(loginAttempts.succeeded).toHaveBeenCalledWith('ana@example.com');
     });
@@ -195,7 +305,7 @@ describe('AuthService', () => {
 
     it('rejeita senha errada com 401 genérico', async () => {
       users.findByEmail.mockResolvedValue(makeUser());
-      password.verify.mockResolvedValue(false);
+      password.verify.mockResolvedValue(MISMATCH);
 
       await expect(
         service.login('ana@example.com', 'errada', ctx),
@@ -213,7 +323,7 @@ describe('AuthService', () => {
 
     it('rejeita email desconhecido com o MESMO 401, ainda gastando tempo de hash', async () => {
       users.findByEmail.mockResolvedValue(null);
-      password.verify.mockResolvedValue(false);
+      password.verify.mockResolvedValue(MISMATCH);
 
       await expect(
         service.login('ninguem@example.com', 'x', ctx),
@@ -232,13 +342,67 @@ describe('AuthService', () => {
       expect(password.verify).toHaveBeenCalledTimes(1);
     });
 
+    it('hash legado (senha bruta, sem NFKC): entra e troca pelo hash da forma normalizada', async () => {
+      const user = makeUser({ passwordHash: 'hash-legado' });
+      users.findByEmail.mockResolvedValue(user);
+      password.verify.mockResolvedValue(LEGACY_MATCH);
+      password.hash.mockResolvedValue('hash-normalizado');
+
+      const result = await service.login('ana@example.com', 'cafe\u0301!', ctx);
+
+      expect(result).toEqual({ ...tokens, user });
+      // O PasswordService normaliza dentro do hash().
+      expect(password.hash).toHaveBeenCalledWith('cafe\u0301!');
+      // Compare-and-set no hash antigo: não ressuscita senha descartada.
+      expect(prisma.user.updateMany).toHaveBeenCalledWith({
+        where: { id: 'user-1', passwordHash: 'hash-legado' },
+        data: { passwordHash: 'hash-normalizado' },
+      });
+    });
+
+    it('não refaz o hash quando a senha bate na forma normalizada', async () => {
+      users.findByEmail.mockResolvedValue(makeUser());
+      password.verify.mockResolvedValue(MATCH);
+
+      await service.login('ana@example.com', 'S3nh@Forte!', ctx);
+
+      expect(password.hash).not.toHaveBeenCalled();
+      expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('email desconhecido passa a senha recebida pelo mesmo verify da senha errada', async () => {
+      // O verify decide sozinho se tenta também a senha bruta, pela senha
+      // recebida; chamado igual nos dois caminhos, o custo é o mesmo.
+      password.verify.mockResolvedValue(MISMATCH);
+      users.findByEmail.mockResolvedValueOnce(makeUser());
+      await expect(
+        service.login('ana@example.com', 'cafe\u0301!', ctx),
+      ).rejects.toThrow('Invalid credentials');
+      users.findByEmail.mockResolvedValueOnce(null);
+      await expect(
+        service.login('ninguem@example.com', 'cafe\u0301!', ctx),
+      ).rejects.toThrow('Invalid credentials');
+
+      expect(password.verify).toHaveBeenNthCalledWith(
+        1,
+        'hash-da-senha',
+        'cafe\u0301!',
+      );
+      expect(password.verify).toHaveBeenNthCalledWith(
+        2,
+        'hash-da-senha', // o mock do hash() também gera o dummy
+        'cafe\u0301!',
+      );
+      expect(prisma.user.updateMany).not.toHaveBeenCalled();
+    });
+
     it('rejeita login por senha em conta só-Google (sem passwordHash)', async () => {
       users.findByEmail.mockResolvedValue(
         makeUser({ passwordHash: null, googleId: 'g-1' }),
       );
       // Mesmo que o verify "passasse" (não passa: é o hash dummy), a ausência
       // de senha tem que bloquear.
-      password.verify.mockResolvedValue(true);
+      password.verify.mockResolvedValue(MATCH);
 
       await expect(
         service.login('ana@example.com', 'qualquer', ctx),

@@ -45,7 +45,7 @@ async function expectInvalidRefresh(promise: Promise<unknown>): Promise<void> {
   );
 }
 
-const user = { id: 'user-1', email: 'ana@example.com' };
+const user = { id: 'user-1' };
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ctx: SecurityContext = { ip: '203.0.113.7', clientType: 'mobile' };
@@ -125,10 +125,12 @@ describe('TokenService', () => {
 
       const { accessToken, refreshToken } = await service.issueTokenPair(user);
 
-      const access = jwt.verify<{ sub: string; email: string }>(accessToken, {
+      const access = jwt.verify<Record<string, unknown>>(accessToken, {
         secret: env.JWT_SECRET,
       });
-      expect(access).toMatchObject({ sub: user.id, email: user.email });
+      expect(access).toMatchObject({ sub: user.id });
+      // A-21: sem PII no payload, que é só base64.
+      expect(access).not.toHaveProperty('email');
 
       const refresh = jwt.verify<{ sub: string; jti: string }>(refreshToken, {
         secret: env.JWT_REFRESH_SECRET,
@@ -341,7 +343,7 @@ describe('TokenService', () => {
 
     it('rejeita token assinado com o segredo do ACCESS token', async () => {
       const wrongKind = jwt.sign(
-        { sub: user.id, email: user.email },
+        { sub: user.id },
         { secret: env.JWT_SECRET, expiresIn: '15m' },
       );
       await expectInvalidRefresh(service.rotateRefreshToken(wrongKind, ctx));
@@ -578,7 +580,6 @@ describe('TokenService', () => {
 
         expect(prisma.refreshToken.findUnique).toHaveBeenNthCalledWith(2, {
           where: { id: 'rt-1' },
-          include: { user: { select: { id: true, email: true } } },
         });
         expect(prisma.refreshToken.update).not.toHaveBeenCalled();
         expect(prisma.refreshToken.create).toHaveBeenCalledTimes(1);

@@ -16,7 +16,7 @@ interface FakeRequest {
   path: string;
   ip?: string;
   headers?: Record<string, string>;
-  user?: { userId: string; email: string };
+  user?: { userId: string };
 }
 
 function createHost(
@@ -204,7 +204,7 @@ describe('AllExceptionsFilter', () => {
         path: '/activities',
         url: '/activities',
         headers: { 'x-client-type': 'desktop' },
-        user: { userId: 'user-1', email: 'ana@example.com' },
+        user: { userId: 'user-1' },
       });
       filter.catch(new ThrottlerException(), host);
 

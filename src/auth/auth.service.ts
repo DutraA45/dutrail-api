@@ -1,23 +1,29 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { maxLength } from 'class-validator';
 import { createHash, randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { SecurityContext } from '../security/security-context.js';
 import { SecurityLogService } from '../security/security-log.service.js';
 import { UsersService } from '../users/users.service.js';
 import type { User } from '../generated/prisma/client.js';
+import { BreachedPasswordService } from './breached-password.service.js';
 import { GoogleEmailNotVerifiedException } from './google-callback.js';
 import type { GoogleProfile } from './interfaces/google-profile.interface.js';
 import { LoginAttemptsService } from './login-attempts.service.js';
-import { PasswordService } from './password.service.js';
+import { PASSWORD_MAX_LENGTH, PasswordService } from './password.service.js';
 import { TokenService, type TokenPair } from './token.service.js';
 
 export interface AuthResult extends TokenPair {
   user: User;
 }
+
+export const BREACHED_PASSWORD_MESSAGE =
+  'password has appeared in a known data breach; choose a different one';
 
 /** Validade do código de troca gerado no callback do Google. */
 const EXCHANGE_CODE_TTL_MS = 60_000;
@@ -41,6 +47,7 @@ export class AuthService {
     private readonly tokenService: TokenService,
     private readonly prisma: PrismaService,
     private readonly securityLog: SecurityLogService,
+    private readonly breachedPasswords: BreachedPasswordService,
     private readonly loginAttempts: LoginAttemptsService,
   ) {}
 
@@ -50,6 +57,15 @@ export class AuthService {
     name: string | undefined,
     ctx: SecurityContext,
   ): Promise<AuthResult> {
+    // O DTO limita a senha recebida; o NFKC pode expandi-la (ex.: "㍿" vira 4
+    // caracteres), então o teto vale de novo para o que vai ao hash (A-09).
+    // Mesma contagem do @MaxLength, e antes do 409, como a validação do DTO.
+    if (!maxLength(PasswordService.normalize(password), PASSWORD_MAX_LENGTH)) {
+      throw new BadRequestException([
+        `password must be shorter than or equal to ${PASSWORD_MAX_LENGTH} characters after Unicode normalization (NFKC)`,
+      ]);
+    }
+
     const existing = await this.usersService.findByEmail(email);
     if (existing) {
       // 409 explícito. Trade-off: revela que o email existe, mas o fluxo de
@@ -62,6 +78,8 @@ export class AuthService {
       });
       throw new ConflictException('Email already registered');
     }
+
+    await this.rejectBreachedPassword(password, email, ctx);
 
     const passwordHash = await this.passwordService.hash(password);
     const user = await this.usersService.create({ email, passwordHash, name });
@@ -81,11 +99,13 @@ export class AuthService {
 
     const user = await this.usersService.findByEmail(email);
 
-    // Conta inexistente OU conta só-Google (sem senha): mesma resposta.
+    // Conta inexistente OU conta só-Google (sem senha): mesma resposta. O
+    // hash dummy passa pela mesma verificação (inclusive a da senha bruta),
+    // então o custo é o mesmo da senha errada.
     const hashToCheck = user?.passwordHash ?? (await this.getDummyHash());
-    const passwordOk = await this.passwordService.verify(hashToCheck, password);
+    const check = await this.passwordService.verify(hashToCheck, password);
 
-    if (!user || !user.passwordHash || !passwordOk) {
+    if (!user || !user.passwordHash || !check.valid) {
       // O motivo distingue os casos só no log; o cliente recebe o mesmo 401.
       // A tentativa já contada fica valendo como falha.
       this.securityLog.warn('login_failed', ctx, {
@@ -98,6 +118,10 @@ export class AuthService {
             : 'wrong_password',
       });
       throw new UnauthorizedException('Invalid credentials');
+    }
+
+    if (check.needsRehash) {
+      await this.upgradeLegacyHash(user.id, user.passwordHash, password);
     }
 
     await this.loginAttempts.succeeded(email);
@@ -291,6 +315,50 @@ export class AuthService {
       userId: stored.user.id,
     });
     return { ...tokens, user: stored.user };
+  }
+
+  /**
+   * Senha vazada (A-09): 400. Por último no cadastro, depois das checagens
+   * locais, porque é a única que vai à rede. Se a API não responder (rede,
+   * timeout, erro), o cadastro segue: a indisponibilidade de um serviço de
+   * terceiros não pode derrubar o cadastro. Fica um warn no log.
+   */
+  private async rejectBreachedPassword(
+    password: string,
+    email: string,
+    ctx: SecurityContext,
+  ): Promise<void> {
+    const result = await this.breachedPasswords.check(password);
+    if (result === 'breached') {
+      this.securityLog.warn('signup_rejected', ctx, {
+        email,
+        reason: 'breached_password',
+      });
+      throw new BadRequestException([BREACHED_PASSWORD_MESSAGE]);
+    }
+    if (result === 'timeout' || result === 'error') {
+      this.securityLog.warn('breach_check_unavailable', ctx, {
+        reason: result === 'timeout' ? 'timeout' : 'check_error',
+      });
+    }
+  }
+
+  /**
+   * Rehash transparente (A-09): a senha só bateu com o hash legado (bruta,
+   * sem NFKC), então gravamos o hash da forma normalizada. Compare-and-set no
+   * hash antigo: se a senha mudou ou foi descartada nesse meio-tempo (vínculo
+   * com o Google, A-01), não ressuscitamos a credencial.
+   */
+  private async upgradeLegacyHash(
+    userId: string,
+    legacyHash: string,
+    password: string,
+  ): Promise<void> {
+    const passwordHash = await this.passwordService.hash(password);
+    await this.prisma.user.updateMany({
+      where: { id: userId, passwordHash: legacyHash },
+      data: { passwordHash },
+    });
   }
 
   private static hashCode(code: string): string {

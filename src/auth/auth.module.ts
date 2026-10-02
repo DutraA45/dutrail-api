@@ -6,6 +6,7 @@ import { SecurityLogModule } from '../security/security-log.module.js';
 import { UsersModule } from '../users/users.module.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
+import { BreachedPasswordService } from './breached-password.service.js';
 import { ExpiredTokensCleanupService } from './expired-tokens-cleanup.service.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import { LoginAttemptsService } from './login-attempts.service.js';
@@ -35,6 +36,8 @@ import { TokenService } from './token.service.js';
     AuthService,
     TokenService,
     PasswordService,
+    // Consulta de senha vazada no cadastro (A-09).
+    BreachedPasswordService,
     // Sabe apenas POR ONDE o refresh token entra e sai (cookie vs corpo).
     RefreshTokenTransport,
     // Cookie assinado com o state + code_verifier do login com Google (A-02).
