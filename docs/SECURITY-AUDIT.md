@@ -50,7 +50,7 @@ corrigido, decisão registrada) ou **Pendente** (ainda não tratado).
 | A-06 | **Média**   | 11   | `src/app.setup.ts:12-57` (sem Helmet); `package.json:29-51` (`helmet` ausente); `node_modules/express/lib/application.js:94`                                     | **Sem cabeçalhos de segurança.** Não há Helmet: sem `Strict-Transport-Security`, `X-Content-Type-Options`, `Content-Security-Policy`/`frame-ancestors` (a Swagger UI é HTML) nem `Referrer-Policy`. `X-Powered-By: Express` segue ativo (padrão do Express 5). ASVS 14.4.x, 9.1.1.                                          | Sem HSTS, o primeiro acesso por `http://` fica exposto a SSL stripping (vale para o access token no corpo, embora o cookie `Secure` resista). A Swagger UI pode ser emoldurada (clickjacking do "Try it out" com Bearer colado). Fingerprinting do stack.                                                            | `app.use(helmet())` com HSTS `max-age=31536000; includeSubDomains`, CSP compatível com a Swagger UI (ou Swagger desligado em produção) e `frame-ancestors 'none'`. O Helmet já remove o `X-Powered-By`. Se o HSTS ficar no proxy, documentar.                                                                              | P    | **Corrigido.** helmet é o primeiro middleware (`src/app.setup.ts`): HSTS `max-age=31536000; includeSubDomains` emitido pela app, CSP padrão do helmet com `frame-ancestors 'none'`, `X-Frame-Options: DENY`, nosniff, `Referrer-Policy: no-referrer`, sem `X-Powered-By`, inclusive em 401/404. Só `/docs`, `/docs/*` e `/docs-json` recebem a CSP sem `upgrade-insecure-requests`. Coberto por `test/security-headers.e2e-spec.ts`. |
 | A-07 | **Média**   | 12   | `src/auth/token.service.ts:145-151`; `src/auth/auth.service.ts:67-69`, `:145-157`; loggers existentes só em `src/common/filters/all-exceptions.filter.ts:25` e `src/activities/activities.service.ts:31` | **Nenhum log de eventos de segurança.** Login falho, reuso de refresh token (revoga tudo em silêncio), código de troca inválido, vinculação de conta Google, logout e 429 não são registrados. ASVS 7.1.3, 7.2.1, 7.2.2 (L2).                                                                                            | Um roubo de token (reuso) ou um credential stuffing em curso ficam invisíveis. Sem trilha forense para responder a incidente ou a reclamação de "fui deslogado".                                                                                                                                                  | Logger estruturado (JSON) com `event`, `userId` quando houver, IP real, user-agent e timestamp. Nunca senha nem token, e email mascarado ou em hash. Alerta para `refresh_reuse_detected` e para picos de `login_failed`.                                                                                                      | P    | **Corrigido.** Ver [nota](#a-07). |
 | A-08 | Baixa       | 9    | `src/auth/token.service.ts:120-125`; `src/auth/auth.controller.ts:182-217`                                                                                      | **Não há como o usuário revogar todas as sessões.** `revokeAllForUser` existe, mas só a detecção de reuso o chama. Não há "sair de todos os dispositivos" nem troca de senha que invalide sessões. ASVS 3.3.3, 3.3.4 (L2).                                                                                               | Celular perdido ou roubado: o usuário não consegue cortar o refresh token do aparelho (válido e renovável indefinidamente, pela janela deslizante).                                                                                                                                                                | `POST /auth/logout-all` (Bearer) chamando `revokeAllForUser` e devolvendo 204. No futuro, chamar o mesmo na troca e no reset de senha.                                                                                                                                                                                       | P    | Pendente |
-| A-09 | Baixa       | 1    | `src/auth/dto/signup.dto.ts:26-29`; `src/auth/password.service.ts:23-25`, `:28-30`                                                                              | **Política de senha abaixo do ASVS e sem normalização Unicode.** Mínimo de 8 (ASVS 2.1.1 pede 12). Sem checagem contra senhas vazadas (2.1.7). Sem `normalize('NFKC')` antes do hash, então "é" pré-composto e "e + ◌́" geram hashes diferentes.                                                                            | Senhas fracas ou vazadas aceitas. Usuário que cria a senha num teclado e digita em outro (Android × macOS) pode não conseguir logar.                                                                                                                                                                                | Mínimo 12, ou 8 com checagem na lista de vazadas (HIBP por k-anonymity, que exige rede). Aplicar `normalize('NFKC')` em `hash` e `verify`; para os hashes existentes, verificar primeiro normalizado e, se falhar, o valor bruto, fazendo rehash no sucesso. O teto de 128 está conforme (ASVS 2.1.2).                           | P    | Pendente |
+| A-09 | Baixa       | 1    | `src/auth/dto/signup.dto.ts:26-29`; `src/auth/password.service.ts:23-25`, `:28-30`                                                                              | **Política de senha abaixo do ASVS e sem normalização Unicode.** Mínimo de 8 (ASVS 2.1.1 pede 12). Sem checagem contra senhas vazadas (2.1.7). Sem `normalize('NFKC')` antes do hash, então "é" pré-composto e "e + ◌́" geram hashes diferentes.                                                                            | Senhas fracas ou vazadas aceitas. Usuário que cria a senha num teclado e digita em outro (Android × macOS) pode não conseguir logar.                                                                                                                                                                                | Mínimo 12, ou 8 com checagem na lista de vazadas (HIBP por k-anonymity, que exige rede). Aplicar `normalize('NFKC')` em `hash` e `verify`; para os hashes existentes, verificar primeiro normalizado e, se falhar, o valor bruto, fazendo rehash no sucesso. O teto de 128 está conforme (ASVS 2.1.2).                           | P    | **Corrigido**, com decisão registrada (mínimo de 8 mantido). Ver [nota](#a-09). |
 | A-10 | Baixa       | 11   | `src/app.setup.ts:46-57`                                                                                                                                       | **Swagger (`/docs`, `/docs-json`) exposto incondicionalmente, inclusive em produção.**                                                                                                                                                                                                                                  | Mapa completo da superfície da API para quem varre a internet, e uma página HTML sem CSP (ver A-06). O risco é baixo porque o contrato já é compartilhado com os clientes.                                                                                                                                         | Registrar só quando `NODE_ENV !== production`, ou proteger com basic auth / allowlist de IP no proxy.                                                                                                                                                                                                  | P    | **Corrigido.** O Swagger só é registrado com `NODE_ENV !== 'production'` (`shouldSetupSwagger` em `src/app.setup.ts`); em produção `/docs`, `/docs-json` e `/docs-yaml` respondem 404. Coberto por `test/swagger-by-env.e2e-spec.ts`. |
 | A-11 | Baixa       | 6    | `src/auth/refresh-token-transport.service.ts:17`, `:50-51`, `:72`                                                                                               | **Cookie: `Max-Age` fixo e `Secure` condicionado.** `Max-Age` é 7 dias fixos, independente de `JWT_REFRESH_TTL` (divergência documentada em `docs/API-CONTRACT.md:91-94`). `Secure` só entra se `NODE_ENV === 'production'`, então falha aberto (ver A-05). Sem prefixo `__Secure-`.                                                 | TTL do refresh maior que 7 dias: o browser descarta o cookie antes da sessão expirar no servidor. `NODE_ENV` errado: o refresh token trafega em HTTP puro.                                                                                                                                                       | Calcular `maxAge` a partir do `exp` do token emitido. `secure: true` por padrão, desligado só com flag explícita de dev. Renomear para `__Secure-refreshToken` (o `__Host-` exigiria `Path=/`).                                                                                                        | P    | **Corrigido.** Ver [nota](#a-11). |
 | A-12 | Baixa       | 5    | `prisma/schema.prisma:36-61`; `README.md:324`                                                                                                                  | **Sem limpeza de `RefreshToken` e `OAuthExchangeCode` expirados** (o README reconhece). Tokens revogados ficam para sempre.                                                                                                                                                                                             | As tabelas crescem sem limite e guardam metadados de sessão (userId, horários) além do necessário (ASVS 8.3.x, minimização).                                                                                                                                                                                      | Job diário: `deleteMany where expiresAt < now()`. Só apagar depois do `exp`, porque até lá o registro revogado ainda serve para detectar reuso.                                                                                                                                                                                  | P    | Pendente |
@@ -62,7 +62,7 @@ corrigido, decisão registrada) ou **Pendente** (ainda não tratado).
 | A-18 | Informativa | 10   | `src/auth/token.service.ts:84`, `:142`, `:151`, `:155`                                                                                                         | **Mensagens de 401 distintas** ("Invalid refresh token", "Refresh token reuse detected", "Refresh token expired"), apesar do comentário na linha 84 dizer "mesmo 401 genérico".                                                                                                                                         | Quem roubou o token fica sabendo que o reuso foi detectado. Impacto mínimo.                                                                                                                                                                                                                                  | Unificar a mensagem para o cliente e manter o motivo só no log de segurança (A-07), ou corrigir o comentário.                                                                                                                                                                                       | P    | **Corrigido.** Ver [nota](#a-18). |
 | A-19 | Informativa | 12   | `src/common/filters/all-exceptions.filter.ts:35-40`                                                                                                            | **O log de 5xx grava `request.url` com a query string.** No `/auth/google/callback`, isso inclui o `code` de autorização do Google.                                                                                                                                                                                       | Baixo: o `code` do Google é de uso único, expira em minutos e exige o client secret. É o único caminho encontrado em que um valor de credencial chega ao log.                                                                                                                                                             | Logar `request.path` (sem query) ou mascarar `code`/`state`.                                                                                                                                                                                                                                           | P    | **Corrigido.** Ver [nota](#a-19). |
 | A-20 | Informativa | 13   | `compose.yaml:7-11`; `.env.test` (versionado)                                                                                                                   | `POSTGRES_PASSWORD` do compose tem valor fraco/padrão e a porta `5433` fica publicada em todas as interfaces. `.env.test` é versionado, mas contém só valores de teste (palavras "test" nos segredos, banco local).                                                                                                               | Postgres de dev acessível pela rede local com senha trivial.                                                                                                                                                                                                                                                 | Publicar como `127.0.0.1:5433:5432`.                                                                                                                                                                                                                                                                   | P    | **Corrigido.** Ver [nota](#a-20). |
-| A-21 | Informativa | 4, 9 | `src/auth/strategies/jwt.strategy.ts:16-17`, `:31-33`; `src/auth/token.service.ts:51-54`                                                                          | Access token stateless: continua válido por até 15 min depois de logout, reuso ou exclusão do usuário (decisão documentada). Leva o `email` em claro (base64) no payload.                                                                                                                                                  | Janela de 15 min após revogação. PII em todo token, que pode ir parar em logs de terceiros.                                                                                                                                                                                                                         | Manter o TTL curto. Remover `email` do payload (buscar do banco quando precisar) ou aceitar como decisão consciente.                                                                                                                                                                                  | —    | Pendente |
+| A-21 | Informativa | 4, 9 | `src/auth/strategies/jwt.strategy.ts:16-17`, `:31-33`; `src/auth/token.service.ts:51-54`                                                                          | Access token stateless: continua válido por até 15 min depois de logout, reuso ou exclusão do usuário (decisão documentada). Leva o `email` em claro (base64) no payload.                                                                                                                                                  | Janela de 15 min após revogação. PII em todo token, que pode ir parar em logs de terceiros.                                                                                                                                                                                                                         | Manter o TTL curto. Remover `email` do payload (buscar do banco quando precisar) ou aceitar como decisão consciente.                                                                                                                                                                                  | —    | **Corrigido.** Ver [nota](#a-21). |
 
 ---
 
@@ -380,6 +380,61 @@ sugeridos estão no `README.md` ("Logs de segurança"). Cobertura:
   gerou o `rate_limited`. Os dois estão no backlog.
 - Os alertas estão só documentados; nenhum está configurado.
 
+### A-09
+
+**O que mudou.**
+
+1. **Normalização NFKC.** `PasswordService` (`src/auth/password.service.ts`)
+   aplica `normalize('NFKC')` antes do hash e da verificação, no cadastro e
+   no login. Se a forma normalizada não bate, `verify` tenta a senha bruta
+   (hashes anteriores ao A-09) e devolve `needsRehash`. O login então grava o
+   hash da forma normalizada (`upgradeLegacyHash` em
+   `src/auth/auth.service.ts`) com compare-and-set no hash antigo: só troca se
+   ele ainda estiver no banco, para não reativar uma senha descartada pelo
+   A-01. O custo de tempo é o mesmo nos caminhos "senha errada" e "email
+   inexistente" (medido): a segunda verificação depende só da senha recebida,
+   e o hash dummy passa pelo mesmo caminho. No cadastro, o teto de 128 é
+   conferido de novo depois de normalizar, porque o NFKC pode aumentar o
+   tamanho da senha.
+2. **Senhas vazadas no cadastro.** `BreachedPasswordService`
+   (`src/auth/breached-password.service.ts`) consulta o Have I Been Pwned por
+   k-anonymity: só os 5 primeiros caracteres do SHA-1 saem da máquina, com
+   `Add-Padding`. A senha que aparece em vazamentos recebe 400 (mensagem
+   `password has appeared in a known data breach; choose a different one`) e
+   gera o evento `signup_rejected` com `reason: breached_password`. A checagem
+   roda por último no cadastro, depois do 409. Variáveis:
+   `BREACHED_PASSWORD_CHECK` (padrão `true`) e `BREACHED_PASSWORD_TIMEOUT_MS`
+   (padrão 2000, de 100 a 10000).
+3. **Decisão aceita: o mínimo continua 8 no cadastro.** O ASVS 4.0.3 cita 12,
+   mas o mínimo de 8, somado à checagem de vazadas, ao Argon2id e ao limite de
+   tentativas por IP e por conta, foi considerado suficiente para esta fase.
+   (Hoje só existe o limite por IP, sem `trust proxy`; o limite por conta
+   depende do A-03, ainda pendente.) Revisar se o mínimo de 12 for adotado.
+
+Cobertura: `test/password-normalization.e2e-spec.ts`,
+`test/breached-password.e2e-spec.ts`, `src/auth/password.service.spec.ts`,
+`src/auth/breached-password.service.spec.ts` e
+`src/auth/auth.service.spec.ts`.
+
+**Riscos aceitos:**
+
+- Se o HIBP estiver fora do ar ou demorar, o cadastro segue e fica o warn
+  `breach_check_unavailable`. A disponibilidade do cadastro teve prioridade.
+- O login não consulta a lista: uma senha que vazou depois do cadastro
+  continua entrando.
+- O SHA-1 enviado é o da senha normalizada em NFKC. Senhas com caracteres
+  fora do ASCII podem não ser encontradas na lista.
+
+**Pendências:**
+
+- O deploy precisa de saída HTTPS para `api.pwnedpasswords.com`.
+- Quando existir fluxo de troca ou de reset de senha, ele deve chamar a mesma
+  checagem.
+- `PASSWORD_MAX_LENGTH` está repetido no `PasswordService`: os DTOs de
+  cadastro e login usam o literal `128`.
+- Se a gravação do hash novo falhar no login, a resposta é 500 e nenhum
+  evento de log registra essa troca.
+
 ### A-10
 
 **O que mudou.** O Swagger só é registrado fora de produção
@@ -510,6 +565,15 @@ podman ps --format '{{.Names}} {{.Ports}}'
 
 O esperado é `127.0.0.1:5433->5432/tcp`.
 
+### A-21
+
+**O que mudou.** O `email` saiu do payload do access token
+(`AccessTokenPayload` em `src/auth/interfaces/jwt-payload.interface.ts`) e de
+`req.user` (`AuthenticatedUser`). Nenhum código o lia. O `sub` continua.
+Tokens antigos que ainda trazem o `email` continuam válidos. O `TokenService`
+deixou de buscar o usuário junto do refresh token. Cobertura:
+`test/password-normalization.e2e-spec.ts` e `src/auth/token.service.spec.ts`.
+
 ---
 
 ## Impacto no dutrail-web
@@ -545,6 +609,10 @@ Mudanças da API que o frontend Angular precisa absorver:
   interceptor não desloga: repete o refresh uma vez, porque a renovação pode
   ter acontecido e a resposta se perdido. O retry cai na janela de tolerância.
   O exemplo está em `docs/API-CONTRACT.md`.
+- **Cadastro pode receber 400 por senha vazada (A-09).** `POST /auth/signup`
+  responde 400 com a mensagem
+  `password has appeared in a known data breach; choose a different one`.
+  O formulário deve mostrar uma mensagem própria e pedir outra senha.
 
 ## Impacto no App Android
 
@@ -556,3 +624,7 @@ Mudanças da API que o app Android precisa absorver:
   `/auth/refresh` uma vez com o **mesmo** token, logo em seguida e ainda dentro
   do lock, para cair na janela de tolerância. Só um 401 limpa a sessão.
   Um reuso detectado encerra só a sessão daquele aparelho.
+- **Cadastro pode receber 400 por senha vazada (A-09).** `POST /auth/signup`
+  responde 400 com a mensagem
+  `password has appeared in a known data breach; choose a different one`.
+  O formulário deve mostrar uma mensagem própria e pedir outra senha.
