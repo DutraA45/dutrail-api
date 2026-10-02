@@ -24,7 +24,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "audit:prod": "npm audit --omit=dev"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1140.0",
@@ -75,6 +76,10 @@
     "typescript": "^6.0.2",
     "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^4.1.2"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.2",
+    "mysql2": "^3.24.5"
   },
   "allowScripts": {
     "argon2@0.45.1": true
