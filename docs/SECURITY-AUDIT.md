@@ -1,12 +1,12 @@
 # Auditoria de segurança — autenticação do dutrail-api
 
-| Campo       | Valor                                                                                                                                              |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Data        | 2026-09-30                                                                                                                                         |
-| Commit      | `9824177` (branch `main`, árvore limpa)                                                                                                            |
-| Tipo        | Revisão estática, somente leitura (código, schema, migrations, contratos, `node_modules` das libs de auth) + `npm audit`                            |
-| Referências | OWASP ASVS 4.0.3 (L1/L2: V2, V3, V4, V7, V8, V9, V13), RFC 9700 (OAuth 2.0 Security BCP), RFC 8252 (OAuth para apps nativos)                       |
-| Fora        | Frontend Angular, app Android, infraestrutura de produção (ver [Não verificado](#não-verificado))                                                   |
+| Campo       | Valor |
+| ----------- | ----- |
+| Data        | Auditoria: 2026-09-30. Fechamento: 2026-10-02 |
+| Commit      | Auditoria: `9824177` (branch `main`, árvore limpa). Fechamento: `349cfd3` (branch `chore/security-deps-closing`, igual a `main`), mais as mudanças deste fechamento ainda não commitadas (`package.json`, `package-lock.json`, este relatório e o `README.md`) |
+| Tipo        | Auditoria: revisão estática, somente leitura (código, schema, migrations, contratos, `node_modules` das libs de auth) + `npm audit`. Fechamento: conferência de cada achado no código e no `git log`, `npm audit`, e execução de `tsc`, lint, prettier, build e testes unitários e e2e (estes num Postgres descartável, em container local) |
+| Referências | OWASP ASVS 4.0.3 (L1/L2: V2, V3, V4, V7, V8, V9, V13), RFC 9700 (OAuth 2.0 Security BCP), RFC 8252 (OAuth para apps nativos) |
+| Fora        | Frontend Angular, app Android, infraestrutura de produção (ver [Não verificado](#não-verificado)) |
 
 Nenhum valor de segredo aparece neste documento. As variáveis de ambiente
 foram analisadas só por nome, tamanho, classes de caracteres e presença de
@@ -16,7 +16,7 @@ palavras de placeholder. Os valores não foram impressos em nenhum momento.
 
 ## Resumo executivo
 
-A base é sólida: senhas com Argon2id (parâmetros OWASP), refresh token
+**Na auditoria (2026-09-30).** A base é sólida: senhas com Argon2id (parâmetros OWASP), refresh token
 rotativo com compare-and-set atômico e só o hash no banco, segredos de access
 e refresh distintos e validados no boot, algoritmo do access token fixado em
 HS256, guard JWT global com opt-out explícito, IDOR tratado em `/activities`,
@@ -30,15 +30,38 @@ a validação de segredos que aceita os placeholders do `.env.example`, a
 ausência de cabeçalhos de segurança (Helmet/HSTS) e a falta de log de eventos
 de segurança. Total: **1 Alta, 6 Médias, 8 Baixas, 6 Informativas.**
 
+**No fechamento (2026-10-02).** Os 21 achados foram conferidos no código e
+no `git log`. Status final: **20 Corrigidos, 1 Risco aceito (A-16), 0
+Pendentes.** Vários dos corrigidos deixam riscos residuais aceitos e
+registrados (por exemplo, o mínimo de 8 caracteres do A-09 e o cookie sem
+prefixo `__Secure-` do A-11). Esses riscos e as pendências operacionais do
+deploy estão em [Riscos aceitos e pendências](#riscos-aceitos-e-pendências).
+No `npm audit`, as 4 vulnerabilidades altas de produção foram zeradas com
+`overrides`. Restam 5 em dependências de desenvolvimento, todas via
+`@nestjs/mau` (A-15).
+
+O fechamento não muda a natureza do trabalho: a análise foi estática, e os
+testes (445 unitários e 244 e2e, todos passando) rodaram num banco
+descartável, não em produção. A topologia, a configuração e os valores reais
+de produção continuam fora do que foi verificado (ver
+[Não verificado](#não-verificado)). Os achados corrigidos reduzem os riscos
+descritos, mas não eliminam riscos que esta revisão não cobriu.
+
 ---
 
 ## Achados
 
 Esforço: **P** = horas, **M** = 1–3 dias, **G** = mais que isso.
 
-Status: **Corrigido** (confirmado no código; riscos residuais em
-[Notas de correção](#notas-de-correção)), **Risco aceito** (não será
-corrigido, decisão registrada) ou **Pendente** (ainda não tratado).
+Status (conferido no fechamento, 2026-10-02):
+
+- **Corrigido**: a correção está no código e foi conferida. Os riscos
+  residuais e as decisões aceitas estão na nota do achado, em
+  [Notas de correção](#notas-de-correção), e consolidados em
+  [Riscos aceitos e pendências](#riscos-aceitos-e-pendências).
+- **Risco aceito**: o comportamento foi mantido de propósito. A decisão e a
+  condição de revisão estão registradas.
+- **Pendente**: ainda não tratado. Nenhum achado ficou com esse status.
 
 | ID   | Sev.        | Item | Arquivo:linha                                                                                                                                                  | Descrição                                                                                                                                                                                                                                                                                                                  | Risco concreto                                                                                                                                                                                                                                                                                                        | Correção recomendada                                                                                                                                                                                                                                                                                         | Esf. | Status |
 | ---- | ----------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---- | ------ |
@@ -49,15 +72,15 @@ corrigido, decisão registrada) ou **Pendente** (ainda não tratado).
 | A-05 | **Média**   | 4, 13 | `src/config/env.validation.ts:28-29`, `:42-49`; `.env.example` (`JWT_SECRET`, `JWT_REFRESH_SECRET`)                                                            | **Validação de segredos aceita placeholders conhecidos e `NODE_ENV` falha aberto.** A regra é só `MinLength(32)` e segredos diferentes entre si. Os placeholders do `.env.example` (frases "troque-…" com mais de 50 chars) passam. `NODE_ENV` tem default `development`. No `.env` local, os dois segredos JWT são frases legíveis de dev (não aleatórias): aceitável só em dev. | Deploy com o `.env.example` copiado: o segredo HS256 é público no repositório e qualquer um forja access tokens com `sub` arbitrário (**takeover de qualquer conta**). `NODE_ENV` esquecido em produção: cookie sem `Secure` (A-11) e Swagger exposto (A-10).                                                                        | No boot, recusar segredos que contenham trechos do `.env.example` (ex.: "troque") ou com entropia baixa; exigir ≥ 43 chars base64url (256 bits). Tornar `NODE_ENV` obrigatório, sem default. Documentar a geração (`randomBytes(48)`, já citado no `.env.example`).                                                                | P    | **Corrigido.** Ver [nota](#a-05). |
 | A-06 | **Média**   | 11   | `src/app.setup.ts:12-57` (sem Helmet); `package.json:29-51` (`helmet` ausente); `node_modules/express/lib/application.js:94`                                     | **Sem cabeçalhos de segurança.** Não há Helmet: sem `Strict-Transport-Security`, `X-Content-Type-Options`, `Content-Security-Policy`/`frame-ancestors` (a Swagger UI é HTML) nem `Referrer-Policy`. `X-Powered-By: Express` segue ativo (padrão do Express 5). ASVS 14.4.x, 9.1.1.                                          | Sem HSTS, o primeiro acesso por `http://` fica exposto a SSL stripping (vale para o access token no corpo, embora o cookie `Secure` resista). A Swagger UI pode ser emoldurada (clickjacking do "Try it out" com Bearer colado). Fingerprinting do stack.                                                            | `app.use(helmet())` com HSTS `max-age=31536000; includeSubDomains`, CSP compatível com a Swagger UI (ou Swagger desligado em produção) e `frame-ancestors 'none'`. O Helmet já remove o `X-Powered-By`. Se o HSTS ficar no proxy, documentar.                                                                              | P    | **Corrigido.** helmet é o primeiro middleware (`src/app.setup.ts`): HSTS `max-age=31536000; includeSubDomains` emitido pela app, CSP padrão do helmet com `frame-ancestors 'none'`, `X-Frame-Options: DENY`, nosniff, `Referrer-Policy: no-referrer`, sem `X-Powered-By`, inclusive em 401/404. Só `/docs`, `/docs/*` e `/docs-json` recebem a CSP sem `upgrade-insecure-requests`. Coberto por `test/security-headers.e2e-spec.ts`. |
 | A-07 | **Média**   | 12   | `src/auth/token.service.ts:145-151`; `src/auth/auth.service.ts:67-69`, `:145-157`; loggers existentes só em `src/common/filters/all-exceptions.filter.ts:25` e `src/activities/activities.service.ts:31` | **Nenhum log de eventos de segurança.** Login falho, reuso de refresh token (revoga tudo em silêncio), código de troca inválido, vinculação de conta Google, logout e 429 não são registrados. ASVS 7.1.3, 7.2.1, 7.2.2 (L2).                                                                                            | Um roubo de token (reuso) ou um credential stuffing em curso ficam invisíveis. Sem trilha forense para responder a incidente ou a reclamação de "fui deslogado".                                                                                                                                                  | Logger estruturado (JSON) com `event`, `userId` quando houver, IP real, user-agent e timestamp. Nunca senha nem token, e email mascarado ou em hash. Alerta para `refresh_reuse_detected` e para picos de `login_failed`.                                                                                                      | P    | **Corrigido.** Ver [nota](#a-07). |
-| A-08 | Baixa       | 9    | `src/auth/token.service.ts:120-125`; `src/auth/auth.controller.ts:182-217`                                                                                      | **Não há como o usuário revogar todas as sessões.** `revokeAllForUser` existe, mas só a detecção de reuso o chama. Não há "sair de todos os dispositivos" nem troca de senha que invalide sessões. ASVS 3.3.3, 3.3.4 (L2).                                                                                               | Celular perdido ou roubado: o usuário não consegue cortar o refresh token do aparelho (válido e renovável indefinidamente, pela janela deslizante).                                                                                                                                                                | `POST /auth/logout-all` (Bearer) chamando `revokeAllForUser` e devolvendo 204. No futuro, chamar o mesmo na troca e no reset de senha.                                                                                                                                                                                       | P    | Pendente |
+| A-08 | Baixa       | 9    | `src/auth/token.service.ts:120-125`; `src/auth/auth.controller.ts:182-217`                                                                                      | **Não há como o usuário revogar todas as sessões.** `revokeAllForUser` existe, mas só a detecção de reuso o chama. Não há "sair de todos os dispositivos" nem troca de senha que invalide sessões. ASVS 3.3.3, 3.3.4 (L2).                                                                                               | Celular perdido ou roubado: o usuário não consegue cortar o refresh token do aparelho (válido e renovável indefinidamente, pela janela deslizante).                                                                                                                                                                | `POST /auth/logout-all` (Bearer) chamando `revokeAllForUser` e devolvendo 204. No futuro, chamar o mesmo na troca e no reset de senha.                                                                                                                                                                                       | P    | **Corrigido.** Ver [nota](#a-08). |
 | A-09 | Baixa       | 1    | `src/auth/dto/signup.dto.ts:26-29`; `src/auth/password.service.ts:23-25`, `:28-30`                                                                              | **Política de senha abaixo do ASVS e sem normalização Unicode.** Mínimo de 8 (ASVS 2.1.1 pede 12). Sem checagem contra senhas vazadas (2.1.7). Sem `normalize('NFKC')` antes do hash, então "é" pré-composto e "e + ◌́" geram hashes diferentes.                                                                            | Senhas fracas ou vazadas aceitas. Usuário que cria a senha num teclado e digita em outro (Android × macOS) pode não conseguir logar.                                                                                                                                                                                | Mínimo 12, ou 8 com checagem na lista de vazadas (HIBP por k-anonymity, que exige rede). Aplicar `normalize('NFKC')` em `hash` e `verify`; para os hashes existentes, verificar primeiro normalizado e, se falhar, o valor bruto, fazendo rehash no sucesso. O teto de 128 está conforme (ASVS 2.1.2).                           | P    | **Corrigido**, com decisão registrada (mínimo de 8 mantido). Ver [nota](#a-09). |
 | A-10 | Baixa       | 11   | `src/app.setup.ts:46-57`                                                                                                                                       | **Swagger (`/docs`, `/docs-json`) exposto incondicionalmente, inclusive em produção.**                                                                                                                                                                                                                                  | Mapa completo da superfície da API para quem varre a internet, e uma página HTML sem CSP (ver A-06). O risco é baixo porque o contrato já é compartilhado com os clientes.                                                                                                                                         | Registrar só quando `NODE_ENV !== production`, ou proteger com basic auth / allowlist de IP no proxy.                                                                                                                                                                                                  | P    | **Corrigido.** O Swagger só é registrado com `NODE_ENV !== 'production'` (`shouldSetupSwagger` em `src/app.setup.ts`); em produção `/docs`, `/docs-json` e `/docs-yaml` respondem 404. Coberto por `test/swagger-by-env.e2e-spec.ts`. |
 | A-11 | Baixa       | 6    | `src/auth/refresh-token-transport.service.ts:17`, `:50-51`, `:72`                                                                                               | **Cookie: `Max-Age` fixo e `Secure` condicionado.** `Max-Age` é 7 dias fixos, independente de `JWT_REFRESH_TTL` (divergência documentada em `docs/API-CONTRACT.md:91-94`). `Secure` só entra se `NODE_ENV === 'production'`, então falha aberto (ver A-05). Sem prefixo `__Secure-`.                                                 | TTL do refresh maior que 7 dias: o browser descarta o cookie antes da sessão expirar no servidor. `NODE_ENV` errado: o refresh token trafega em HTTP puro.                                                                                                                                                       | Calcular `maxAge` a partir do `exp` do token emitido. `secure: true` por padrão, desligado só com flag explícita de dev. Renomear para `__Secure-refreshToken` (o `__Host-` exigiria `Path=/`).                                                                                                        | P    | **Corrigido.** Ver [nota](#a-11). |
-| A-12 | Baixa       | 5    | `prisma/schema.prisma:36-61`; `README.md:324`                                                                                                                  | **Sem limpeza de `RefreshToken` e `OAuthExchangeCode` expirados** (o README reconhece). Tokens revogados ficam para sempre.                                                                                                                                                                                             | As tabelas crescem sem limite e guardam metadados de sessão (userId, horários) além do necessário (ASVS 8.3.x, minimização).                                                                                                                                                                                      | Job diário: `deleteMany where expiresAt < now()`. Só apagar depois do `exp`, porque até lá o registro revogado ainda serve para detectar reuso.                                                                                                                                                                                  | P    | Pendente |
+| A-12 | Baixa       | 5    | `prisma/schema.prisma:36-61`; `README.md:324`                                                                                                                  | **Sem limpeza de `RefreshToken` e `OAuthExchangeCode` expirados** (o README reconhece). Tokens revogados ficam para sempre.                                                                                                                                                                                             | As tabelas crescem sem limite e guardam metadados de sessão (userId, horários) além do necessário (ASVS 8.3.x, minimização).                                                                                                                                                                                      | Job diário: `deleteMany where expiresAt < now()`. Só apagar depois do `exp`, porque até lá o registro revogado ainda serve para detectar reuso.                                                                                                                                                                                  | P    | **Corrigido.** Ver [nota](#a-12). |
 | A-13 | Baixa       | 8    | `node_modules/passport-oauth2/lib/strategy.js:134-139`; `node_modules/@nestjs/passport/dist/auth.guard.js:55-57`; `src/auth/auth.controller.ts:247-260`           | **Cancelamento do consentimento e erros do Google terminam no domínio da API.** `error=access_denied` vira `fail()` e depois 401 em JSON, na aba do usuário. Outros `error=` e `code` inválido viram 500 (logado com stack). O mesmo vale para "email não verificado" (`auth.service.ts:99-101`). Documentado em `docs/API-CONTRACT.md:347`. | Usuário preso numa página JSON. Qualquer um pode chamar `/auth/google/callback?code=lixo` e gerar 500 + stack no log (poluição de log; o limite global de 100/min atenua).                                                                                                                                         | Sobrescrever `GoogleAuthGuard.handleRequest` para redirecionar a `${FRONTEND_URL}/auth/callback?error=<código fixo>` (sem descrição vinda do Google). Tratar `TokenError` como 4xx sem stack.                                                                                                                     | P    | **Corrigido.** Ver [nota](#a-13). |
 | A-14 | Baixa       | 4    | `src/auth/token.service.ts:51-67`, `:161-168`; `src/auth/strategies/jwt.strategy.ts:22-28`; `src/config/env.validation.ts:51-57`; `node_modules/jsonwebtoken/verify.js:132-134` | **JWT sem `iss`/`aud`/`typ`; verificação do refresh não fixa o algoritmo; TTLs sem limite.** O access token fixa HS256, mas o refresh aceita HS256/384/512 (padrão do jsonwebtoken para segredo simétrico; `none` continua rejeitado). `JWT_*_TTL` só são validados como string. ASVS 3.5.3.                                                         | Baixo hoje, porque os segredos distintos já impedem trocar access por refresh (e há e2e disso em `test/auth.e2e-spec.ts:457`). Vira problema se outro serviço passar a compartilhar segredo. Um TTL mal digitado (ex.: `"15"` = 15 ms) passa na validação.                                                                            | `issuer`/`audience` no `sign` e no `verify` (`aud` diferente para access e refresh). `algorithms: ['HS256']` no `verify` do refresh. Validar TTL com regex e teto (ex.: access ≤ 1h, refresh ≤ 30d).                                                                                                  | P    | **Corrigido.** Ver [nota](#a-14). |
-| A-15 | Baixa       | 13   | `package.json:40-41`, `:55`, `:70`                                                                                                                             | **`npm audit`: 9 vulnerabilidades (0 críticas, 6 altas, 1 moderada, 2 baixas).** Com `--omit=dev`: 4 altas, todas via `prisma@7.10.0` (CLI, peer de `@prisma/client`): `deepmerge-ts` (GHSA-ggr8-5vv4-36mx) e `mysql2` (GHSA-3f6p-5ww8-9rcr, GHSA-rgwj-5xj2-c3m3). As demais vêm de `@nestjs/mau` (dev): `undici`, `tmp`, `inquirer`, `external-editor`. | Exposição de runtime baixa: `mysql2` não é usado (o banco é Postgres via `@prisma/adapter-pg`) e `deepmerge-ts` roda no carregamento de config do CLI. O `npm audit fix` sugerido faz downgrade major para Prisma 6, o que **não** é recomendado.                                                                                  | Acompanhar o patch do Prisma 7.x. Se necessário, `overrides` para `deepmerge-ts@>=8` e `mysql2@>=3.23.1`, depois de testar. Remover `@nestjs/mau` se não for usado. Rodar `npm audit --omit=dev` no CI.                                                                                                            | P    | Pendente |
-| A-16 | Informativa | 2    | `src/auth/auth.service.ts:46-52`                                                                                                                               | **Signup responde 409 para email existente (trade-off registrado no código).** O tempo também difere: o 409 volta rápido, antes do Argon2, e o 201 é lento. O login está conforme (ver seção Conforme).                                                                                                                        | Enumeração de emails pelo signup, limitada a 10/min por IP. Combinada com A-01, ajuda o atacante a escolher alvos ainda não cadastrados.                                                                                                                                                                         | Aceitar enquanto não houver infraestrutura de email. Quando houver: sempre 202 com "enviamos um email", e a verificação de email resolve A-01 na raiz.                                                                                                                                                          | —    | Pendente |
+| A-15 | Baixa       | 13   | `package.json:40-41`, `:55`, `:70`                                                                                                                             | **`npm audit`: 9 vulnerabilidades (0 críticas, 6 altas, 1 moderada, 2 baixas).** Com `--omit=dev`: 4 altas, todas via `prisma@7.10.0` (CLI, peer de `@prisma/client`): `deepmerge-ts` (GHSA-ggr8-5vv4-36mx) e `mysql2` (GHSA-3f6p-5ww8-9rcr, GHSA-rgwj-5xj2-c3m3). As demais vêm de `@nestjs/mau` (dev): `undici`, `tmp`, `inquirer`, `external-editor`. | Exposição de runtime baixa: `mysql2` não é usado (o banco é Postgres via `@prisma/adapter-pg`) e `deepmerge-ts` roda no carregamento de config do CLI. O `npm audit fix` sugerido faz downgrade major para Prisma 6, o que **não** é recomendado.                                                                                  | Acompanhar o patch do Prisma 7.x. Se necessário, `overrides` para `deepmerge-ts@>=8` e `mysql2@>=3.23.1`, depois de testar. Remover `@nestjs/mau` se não for usado. Rodar `npm audit --omit=dev` no CI.                                                                                                            | P    | **Corrigido** em produção (`npm audit --omit=dev`: 0); dev com risco aceito. Ver [nota](#a-15). |
+| A-16 | Informativa | 2    | `src/auth/auth.service.ts:46-52`                                                                                                                               | **Signup responde 409 para email existente (trade-off registrado no código).** O tempo também difere: o 409 volta rápido, antes do Argon2, e o 201 é lento. O login está conforme (ver seção Conforme).                                                                                                                        | Enumeração de emails pelo signup, limitada a 10/min por IP. Combinada com A-01, ajuda o atacante a escolher alvos ainda não cadastrados.                                                                                                                                                                         | Aceitar enquanto não houver infraestrutura de email. Quando houver: sempre 202 com "enviamos um email", e a verificação de email resolve A-01 na raiz.                                                                                                                                                          | —    | **Risco aceito.** Ver [nota](#a-16). |
 | A-17 | Informativa | 5    | `src/auth/token.service.ts:92-100`                                                                                                                             | **Rotação não transacional.** O CAS revoga o token antigo e só depois `issueTokenPair` grava o novo. Se o INSERT falhar, o usuário fica com o token antigo revogado e sem sucessor.                                                                                                                                         | Raro. Nesse caso o próximo retry do cliente cai na detecção de reuso (A-04) e derruba tudo.                                                                                                                                                                                                                  | Envolver CAS + `create` numa `prisma.$transaction` (faz parte da correção de A-04).                                                                                                                                                                                                                    | P    | **Corrigido.** Ver [nota](#a-17). |
 | A-18 | Informativa | 10   | `src/auth/token.service.ts:84`, `:142`, `:151`, `:155`                                                                                                         | **Mensagens de 401 distintas** ("Invalid refresh token", "Refresh token reuse detected", "Refresh token expired"), apesar do comentário na linha 84 dizer "mesmo 401 genérico".                                                                                                                                         | Quem roubou o token fica sabendo que o reuso foi detectado. Impacto mínimo.                                                                                                                                                                                                                                  | Unificar a mensagem para o cliente e manter o motivo só no log de segurança (A-07), ou corrigir o comentário.                                                                                                                                                                                       | P    | **Corrigido.** Ver [nota](#a-18). |
 | A-19 | Informativa | 12   | `src/common/filters/all-exceptions.filter.ts:35-40`                                                                                                            | **O log de 5xx grava `request.url` com a query string.** No `/auth/google/callback`, isso inclui o `code` de autorização do Google.                                                                                                                                                                                       | Baixo: o `code` do Google é de uso único, expira em minutos e exige o client secret. É o único caminho encontrado em que um valor de credencial chega ao log.                                                                                                                                                             | Logar `request.path` (sem query) ou mascarar `code`/`state`.                                                                                                                                                                                                                                           | P    | **Corrigido.** Ver [nota](#a-19). |
@@ -174,22 +197,33 @@ concorrência nem de resposta perdida.
 
 ## Não verificado
 
-| Tema                                                           | Motivo / o que faltou                                                                                                                                                                                                  |
-| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Topologia de produção na Oracle VM (proxy reverso, LB, terminação TLS, HSTS no proxy, quantos saltos) | Não há configuração de deploy no repositório. Define o valor correto de `trust proxy` (A-03) e se o HSTS já é aplicado fora da app (A-06).                                                                           |
-| Valores reais de produção (segredos, `NODE_ENV`, TTLs, `FRONTEND_URL`) | Só o `.env` local foi analisado. A-05 e A-11 dependem deles.                                                                                                                                                              |
-| Se o `DATABASE_URL` do `.env` local aponta para o banco de produção | Ele aponta para um host remoto com `sslmode=require`. Não dá para saber se é o mesmo banco de produção. Se for, a máquina de dev guarda credenciais de produção.                                                      |
-| Verificação do certificado TLS do Postgres                      | `sslmode=require` e o comportamento do `pg`/`pg-connection-string` instalado não foram testados em runtime.                                                                                                           |
-| Configuração no Google Cloud Console                           | Redirect URIs autorizadas, tela de consentimento e escopos publicados ficam fora do repositório.                                                                                                                      |
-| Bucket OCI (acesso público, PARs, criptografia, versionamento) | Fora do repositório. Só a construção da chave foi verificada.                                                                                                                                                          |
-| Medição de timing real do login                                | A equivalência foi analisada só de forma estática. A app não foi executada (auditoria somente leitura, sem banco).                                                                                                   |
-| Frontend Angular e app Android                                  | Fora do repositório. Faltou ver o `Referrer-Policy` e a limpeza do `?code=` da URL na rota `/auth/callback`, o singleton de refresh entre abas, o armazenamento no Keystore e o tratamento de erro de rede no Authenticator. |
-| Varredura completa de segredos no histórico git (gitleaks/trufflehog) | Ferramenta não instalada e fora do escopo "sem rede além do npm audit". Foi feita só a busca dos valores atuais do `.env` no `git log -p`.                                                                          |
-| Testes (unit/e2e) executados                                    | Não foram rodados: o e2e exige Postgres e trunca tabelas. As afirmações sobre testes citam o que o código dos testes verifica, não resultados de execução.                                                          |
+Atualizado no fechamento (2026-10-02). Continua fora do que foi verificado:
+
+| Tema | Motivo / o que faltou |
+| ---- | --------------------- |
+| Topologia de produção na Oracle VM (proxy reverso, LB, terminação TLS, HSTS no proxy, quantos saltos) | Não há configuração de deploy no repositório. Ela define o valor correto de `TRUST_PROXY` (A-03) e se o HSTS já é aplicado fora da app (A-06). |
+| Valores reais de produção (segredos, `NODE_ENV`, TTLs, `FRONTEND_URL`, `COOKIE_SECURE`, `TRUST_PROXY`, `REFRESH_GRACE_SECONDS`, `BREACHED_PASSWORD_*`, `SCHEDULER_ENABLED`) | Só o `.env` local foi analisado, por nome e formato. O boot recusa parte das configurações inseguras em produção (A-05, A-11, A-14), mas os valores efetivos não foram vistos. |
+| Se o `DATABASE_URL` do `.env` local aponta para o banco de produção | Ele aponta para um host remoto, pelo endpoint com pooler, com `sslmode=require`. Não dá para saber se é o mesmo banco de produção. Se for, a máquina de dev guarda credenciais de produção (ver [Riscos aceitos e pendências](#riscos-aceitos-e-pendências)). |
+| TLS do Postgres em runtime | Pela leitura do código do `pg-connection-string` 2.14.0 instalado, `sslmode=require` hoje é tratado como `verify-full` (certificado e hostname verificados), com aviso de que isso muda na próxima versão major. A conexão real com o banco remoto não foi testada. |
+| Configuração no Google Cloud Console | Redirect URIs autorizadas, tela de consentimento e escopos publicados ficam fora do repositório. |
+| Bucket OCI (acesso público, PARs, criptografia, versionamento) | Fora do repositório. Só a construção da chave dos objetos foi verificada. |
+| Saída HTTPS da VM para `api.pwnedpasswords.com` e comportamento do HIBP em produção | Os testes usam um fake da checagem (sem rede). Não se sabe se a VM alcança o HIBP nem com que latência. Se não alcançar, a checagem falha aberta (A-09). |
+| Medição de timing do login em produção | A equivalência foi analisada no código, e a nota do A-09 registra uma medição local. Não houve medição no ambiente de produção. |
+| Frontend Angular e app Android | Fora do repositório. Faltou ver o `Referrer-Policy` e a limpeza do `?code=`/`?error=` da URL na rota `/auth/callback`, o singleton de refresh entre abas, o armazenamento no Keystore e o tratamento de erro de rede no `Authenticator`. |
+| Varredura completa de segredos no histórico git (gitleaks/trufflehog) | Ferramenta não instalada. Foi feita só a busca dos valores do `.env` local no `git log -p`, na auditoria. |
+| Ambiente com mais de uma instância da API | Os limites por IP e por conta (A-03) e o job de limpeza (A-12) foram testados com uma instância só, com store em memória. |
+
+Os testes unitários e e2e, que na auditoria constavam aqui, foram executados
+no fechamento: 445 unitários e 244 e2e, todos passando. Os e2e rodaram num
+Postgres 17 descartável, em container local, removido ao final. Nenhum teste
+tocou o banco do `.env` nem o de produção.
 
 ---
 
 ## Ordem de prioridade sugerida
+
+Ordem proposta na auditoria, mantida como registro. O estado atual de cada
+achado está na coluna Status da tabela.
 
 ### 1. Bloqueia produção
 
@@ -429,6 +463,30 @@ sugeridos estão no `README.md` ("Logs de segurança"). Cobertura:
   exceto no signup concorrente (ver A-03).
 - Os alertas estão só documentados; nenhum está configurado.
 
+### A-08
+
+**O que mudou.** Nova rota `POST /auth/logout-all`
+(`src/auth/auth.controller.ts`): exige Bearer e `X-Client-Type`, responde
+204 e tem limite próprio de 20/min por IP. `logoutAll` em
+`src/auth/auth.service.ts` **apaga** numa `$transaction` todos os
+`RefreshToken` do usuário (todas as famílias, web e mobile) e os
+`OAuthExchangeCode` pendentes dele. No web, a resposta também apaga o cookie
+do browser que chamou. A rota é idempotente e registra o evento `logout_all`
+com a quantidade de sessões apagadas. Apagar, em vez de marcar `revokedAt`,
+segue a recomendação do A-04: um token reapresentado vira "não encontrado"
+(401 simples), sem passar pela janela de tolerância nem disparar um falso
+`refresh_reuse_detected`. Os contratos (`docs/API-CONTRACT.md`,
+`docs/AUTH-CONTRACT-MOBILE.md`) e o `README.md` ("Logout de todos os
+dispositivos") descrevem a rota. Cobertura: `test/logout-all.e2e-spec.ts` e
+`src/auth/auth.service.spec.ts`.
+
+**Riscos residuais:**
+
+- Os access tokens já emitidos, inclusive o do dispositivo perdido,
+  continuam válidos até expirar (no máximo `JWT_ACCESS_TTL`; ver A-21).
+- Ainda não existem troca nem reset de senha. Quando existirem, devem chamar
+  o mesmo apagamento.
+
 ### A-09
 
 **O que mudou.**
@@ -457,8 +515,9 @@ sugeridos estão no `README.md` ("Logs de segurança"). Cobertura:
 3. **Decisão aceita: o mínimo continua 8 no cadastro.** O ASVS 4.0.3 cita 12,
    mas o mínimo de 8, somado à checagem de vazadas, ao Argon2id e ao limite de
    tentativas por IP e por conta, foi considerado suficiente para esta fase.
-   (Hoje só existe o limite por IP, sem `trust proxy`; o limite por conta
-   depende do A-03, ainda pendente.) Revisar se o mínimo de 12 for adotado.
+   O limite por conta já está em vigor (A-03). O limite por IP depende do
+   `TRUST_PROXY` correto atrás de proxy. Revisar se o mínimo de 12 for
+   adotado.
 
 Cobertura: `test/password-normalization.e2e-spec.ts`,
 `test/breached-password.e2e-spec.ts`, `src/auth/password.service.spec.ts`,
@@ -512,6 +571,30 @@ cookie `__Secure-` sem `Secure`) e mudaria o contrato com o frontend.
 `http://localhost`. Para usar o Safari em dev, defina `COOKIE_SECURE=false`
 no `.env` local.
 
+### A-12
+
+**O que mudou.** O `ExpiredTokensCleanupService`
+(`src/auth/expired-tokens-cleanup.service.ts`) roda um job diário às 03:00
+UTC (`@nestjs/schedule`) e apaga numa `$transaction` os `RefreshToken` e
+`OAuthExchangeCode` com `expiresAt` anterior a agora. Um token rotacionado
+ainda dentro do prazo fica no banco, porque é ele que faz a janela de
+tolerância e a detecção de reuso funcionarem (A-04). O log registra só as
+contagens. Se o job falhar, o log registra só o tipo do erro, e a próxima
+execução tenta de novo. `SCHEDULER_ENABLED` (padrão `true`; `false` no
+`.env.test`) controla o registro do `ScheduleModule` em `src/app.module.ts`.
+`purgeExpired()` é público para os testes e para uma execução manual.
+Detalhes no `README.md` ("Limpeza de tokens expirados"). Cobertura:
+`test/expired-tokens-cleanup.e2e-spec.ts` e
+`src/auth/expired-tokens-cleanup.service.spec.ts`.
+
+**Riscos residuais:**
+
+- O job assume uma única instância da API, sem lock. Com mais de uma, cada
+  instância executaria o job. Os DELETEs são idempotentes, mas o trabalho se
+  repetiria.
+- Linhas revogadas continuam no banco até o `expiresAt` (no máximo
+  `JWT_REFRESH_TTL`), de propósito.
+
 ### A-13
 
 **O que mudou.** Toda falha do `GET /auth/google/callback` termina em
@@ -554,6 +637,79 @@ access e 30d para o refresh. Cobertura: `src/auth/token.service.spec.ts`,
   todo usuário precisa fazer login de novo uma vez. O mesmo acontece sempre
   que `JWT_ISSUER` mudar.
 - `JWT_ISSUER` é opcional, com padrão `dutrail-api`.
+
+### A-15
+
+**Estado em 2026-10-02, antes do fechamento** (`prisma@7.10.0`, igual ao da
+auditoria):
+
+- `npm audit`: 9 vulnerabilidades (0 críticas, 6 altas, 1 moderada, 2
+  baixas).
+- `npm audit --omit=dev`: 4 altas, todas pela CLI do Prisma (`prisma`, que é
+  peer de `@prisma/client`, e `@prisma/config`). São duas dependências
+  fixadas em versão exata pelo Prisma:
+  - `deepmerge-ts@7.1.5` (via `@prisma/config`): GHSA-ggr8-5vv4-36mx, estouro
+    de pilha ao mesclar objetos recursivos. Corrigido em `>=8.0.0`.
+  - `mysql2@3.15.3` (via `prisma`): GHSA-3f6p-5ww8-9rcr (downgrade para
+    `mysql_clear_password`) e GHSA-rgwj-5xj2-c3m3 (descompressão sem limite).
+    Corrigido em `>=3.23.1`.
+- O `npm audit fix --force` sugerido instalaria `prisma@6.19.3` (downgrade
+  major) e `@nestjs/mau@0.0.6`. Não foi usado.
+
+**O que mudou.**
+
+- `overrides` no `package.json`: `deepmerge-ts` `^8.0.2` e `mysql2`
+  `^3.24.5` (resolvidos em 8.0.2 e 3.24.5). Com eles, `prisma validate`,
+  `prisma generate` e `prisma migrate deploy` funcionam, e `tsc`, lint,
+  prettier, build, os testes unitários e os e2e passam. O `migrate deploy`
+  roda no setup dos e2e.
+- Novo script `audit:prod` (`npm audit --omit=dev`).
+
+**Estado depois:** `npm audit --omit=dev` dá **0 vulnerabilidades**.
+`npm audit` dá 5 (0 críticas, 2 altas, 1 moderada, 2 baixas), todas em
+dependências de desenvolvimento via `@nestjs/mau`: `undici` e `tmp` (altas),
+o próprio `@nestjs/mau` (moderada), `inquirer` e `external-editor` (baixas).
+
+**Risco aceito (dev):** o `@nestjs/mau` foi mantido. Nenhum arquivo em
+`src/` ou `test/` o importa, mas o script `deploy` (`nest deploy`, herdado do
+scaffold) delega para ele. As vulnerabilidades restantes não entram no
+bundle de produção (`--omit=dev`) e só seriam exercitadas por quem rodar
+`npm run deploy` na máquina de desenvolvimento. Se o deploy pela plataforma
+Mau não for usado (o alvo hoje é a VM Oracle), dá para remover o script e a
+dependência juntos.
+
+**Manutenção:**
+
+- Quando o Prisma passar a fixar versões corrigidas, os `overrides` podem
+  sair. Num upgrade do Prisma, confira se as versões fixadas mudaram, antes
+  de manter os `overrides`.
+- Não há `.github/workflows` no repositório. Quando houver CI, rode
+  `npm run audit:prod` nele.
+
+### A-16
+
+**Risco aceito.** O signup continua respondendo 409
+(`Email already registered`) para email já cadastrado, e o código não foi
+alterado. Hoje não existe infraestrutura de envio de email, e sem ela uma
+resposta uniforme ("enviamos um email") deixaria o cadastro inutilizável.
+Mitigações atuais:
+
+- Limite de 10/min por IP no signup (A-03), que depende do `TRUST_PROXY`
+  correto atrás de proxy.
+- O evento `signup_conflict` (A-03/A-07) registra o 409 no log de segurança,
+  com `userId` e email mascarado. Picos desse evento indicam enumeração. A
+  exceção é o signup concorrente: dois cadastros simultâneos do mesmo email
+  passam pela checagem, e o segundo falha no índice único (P2002). O
+  `AllExceptionsFilter` traduz essa falha em 409 (`Resource already exists`)
+  sem gerar `signup_conflict`.
+
+A diferença de tempo descrita no achado continua: o 409 volta antes do
+Argon2 e da checagem de senha vazada (A-09).
+
+**Condição de revisão:** quando existir envio de email, passar o signup
+para uma resposta uniforme (sempre a mesma, exista ou não a conta) com
+verificação de email. Isso também resolve na raiz o A-01, que hoje é
+mitigado na vinculação com o Google.
 
 ### A-17
 
@@ -623,12 +779,84 @@ Tokens antigos que ainda trazem o `email` continuam válidos. O `TokenService`
 deixou de buscar o usuário junto do refresh token. Cobertura:
 `test/password-normalization.e2e-spec.ts` e `src/auth/token.service.spec.ts`.
 
+**Risco aceito:** o access token continua stateless. Depois de logout,
+logout-all, reuso detectado ou exclusão do usuário, ele vale até expirar (no
+máximo `JWT_ACCESS_TTL`, 15 min no padrão, com teto de 1h pelo A-14).
+
+---
+
+## Riscos aceitos e pendências
+
+Consolidação do fechamento (2026-10-02). Os detalhes de cada item estão na
+nota do achado de origem.
+
+### Pendências operacionais (deploy)
+
+| Item | Origem | O que fazer |
+| ---- | ------ | ----------- |
+| Migrations antes do código | A-04 e qualquer mudança de schema | Rodar `npx prisma migrate deploy` (ou `npm run prisma:deploy`) **antes** de subir um código que traga migration nova, na VM e em qualquer outro banco. Quando o banco tiver pooler, usar a URL de conexão direta, sem o pooler. Já aconteceu: a API nova falhou com `column familyId does not exist` porque a migration do A-04 não tinha sido aplicada no banco remoto. |
+| `sslmode=verify-full` no `DATABASE_URL` | Ver [Não verificado](#não-verificado) | Trocar `sslmode=require` por `sslmode=verify-full`. O driver `pg` avisa que hoje trata `require` como `verify-full`, mas que, na próxima versão major (`pg` 9 / `pg-connection-string` 3), `require` vai seguir a semântica da libpq, que não verifica o certificado. O `.env` real não foi alterado. |
+| Saída HTTPS para o HIBP | A-09 | A VM precisa alcançar `https://api.pwnedpasswords.com`. Sem isso, a checagem de senha vazada falha aberta em todo cadastro (warn `breach_check_unavailable`). |
+| Topologia do proxy e `TRUST_PROXY` | A-03, A-07 | Confirmar a topologia da VM e só então definir `TRUST_PROXY` (por exemplo, `1` para um Nginx ou Caddy na frente da API), validando com o roteiro do `README.md` ("Rate limit e proxy"). Até lá, atrás de proxy, o `ip` dos limites e do log de segurança é o do proxy, e todos os clientes dividem o mesmo limite por IP. |
+| Alertas | A-04, A-07 | Os eventos já são registrados, mas nenhum alerta está configurado. Configurar pelo menos `refresh_grace_used` (A-04: uso da janela de tolerância, que pode ser um token copiado), `refresh_reuse_detected` (A-07: reuso real), picos de `login_failed` e de `signup_conflict`. |
+| Separação dos bancos de desenvolvimento e de produção | Ver [Não verificado](#não-verificado) | Confirmar se o `DATABASE_URL` do `.env` local aponta para o banco de produção. Se apontar, criar um banco próprio para desenvolvimento e manter as credenciais de produção só na VM. |
+| Container local antigo | A-20 | Recriar o container do Postgres de dev criado antes da correção (`podman compose down` + `podman compose up -d`). Em 2026-10-02, na máquina de desenvolvimento, o container `dutrail-pg` (parado) ainda publicava `0.0.0.0:5433`. |
+| Google Console e bucket OCI | Ver [Não verificado](#não-verificado) | Conferir as redirect URIs autorizadas e a tela de consentimento, e se o bucket não tem acesso público nem PARs abertas. |
+| Varredura de segredos no histórico git | Ver [Não verificado](#não-verificado) | Rodar gitleaks ou trufflehog em todo o histórico. |
+
+### Riscos aceitos
+
+| Item | Origem | Decisão / condição de revisão |
+| ---- | ------ | ----------------------------- |
+| Signup responde 409 para email existente | A-16 | Mantido enquanto não houver envio de email. O `signup_conflict` dá visibilidade ao 409 no log, exceto no signup concorrente (P2002). Revisar quando existir email: resposta uniforme com verificação de email, o que também resolve a raiz do A-01. |
+| Mínimo de 8 caracteres na senha | A-09 | Decisão registrada: Argon2id, checagem de vazadas e limites de tentativa por IP e por conta. O ASVS 4.0.3 cita 12. Revisar se esse mínimo for adotado. |
+| Checagem de senha vazada falha aberta | A-09 | Se o HIBP estiver fora do ar ou demorar mais que `BREACHED_PASSWORD_TIMEOUT_MS`, o cadastro segue, com o warn `breach_check_unavailable`. A disponibilidade do cadastro teve prioridade. O login não consulta a lista. |
+| DoS de conta no limite por conta | A-03 | Quem souber um email pode travar o login por senha dele por até uma janela (padrão: 5 falhas em 15 min). Não afeta refresh, login com Google nem outros emails. |
+| Store em memória dos limites | A-03 | Por processo: zera no restart e não é compartilhado entre instâncias, com teto de 50 mil chaves. Trocar por Redis antes de rodar mais de uma instância. |
+| Backoff progressivo não implementado | A-03 | Só há o limite fixo por conta e por IP. |
+| Corrida entre login por senha e vinculação Google | A-01 | Um login concorrente pode emitir um refresh token que sobrevive à tomada da conta não verificada. Mitigação futura: contador `credentialsVersion` no usuário, incrementado na vinculação e conferido na emissão. |
+| Janela de tolerância concede um par | A-04 | Uma cópia de um token recém-rotacionado, usada dentro da janela, ganha um par independente. Mitigação: o alerta em `refresh_grace_used`, ainda não configurado. |
+| Sem checagem de entropia dos segredos | A-05 | Um segredo legível e longo, sem as palavras bloqueadas, passa em produção. A documentação manda gerar com `randomBytes(48)`. |
+| Cookie sem prefixo `__Secure-` | A-11 | O prefixo quebraria o dev em `http://` e mudaria o contrato com o frontend. |
+| `path` com query string no corpo de erro | A-19 | Volta só para quem fez a request e não vai para o log. |
+| Senha padrão do Postgres local | A-20 | A senha `dutrail` é fraca, mas o acesso fica restrito ao loopback da máquina de dev. |
+| Access token stateless | A-21 | Vale até expirar depois de logout, logout-all ou reuso. |
+| Callback forjado derruba o login em curso | A-02 | Termina em `state_mismatch`, sem ganho de acesso para o atacante. |
+| Vulnerabilidades em dependências de desenvolvimento | A-15 | 5 (2 altas), todas via `@nestjs/mau`, mantido porque o script `deploy` o usa. Remover os dois juntos se o deploy pela Mau não for usado. Retirar os `overrides` quando o Prisma fixar versões corrigidas. |
+| Job de limpeza sem lock | A-12 | Assume uma única instância da API. |
+
+### Funcionalidades ausentes (reauditar quando existirem)
+
+- **Login nativo do Google no Android** (`POST /auth/google/token`,
+  recebendo o `idToken`). Hoje o fluxo de redirect termina no cliente web, e
+  o app não consegue concluir o login com Google.
+- **Verificação de email e reset de senha.** Ambos dependem de envio de
+  email e devem ser auditados quando existirem: o reset e a troca de senha
+  precisam apagar as sessões (como o logout-all) e passar pela checagem de
+  senha vazada.
+- **Definição de senha para conta sem senha** (`hasPassword: false`).
+
 ---
 
 ## Impacto no dutrail-web
 
-Mudanças da API que o frontend Angular precisa absorver:
+Mudanças da API que o frontend Angular precisa absorver (o contrato de
+referência é `docs/API-CONTRACT.md`):
 
+- **Interceptor do refresh: deslogar só em 401 (A-04).** Um 401 no
+  `/auth/refresh` encerra a sessão local. Em erro de rede (status 0), o
+  interceptor não desloga: repete o refresh **uma vez**, logo em seguida,
+  porque a renovação pode ter acontecido e a resposta se perdido. O retry
+  cai na janela de tolerância. Um 429 ou um 5xx no refresh também não
+  encerram a sessão. Garanta um único refresh em voo. O exemplo está em
+  `docs/API-CONTRACT.md` ("Interceptor").
+- **Tratar `?error=` na rota `/auth/callback` (A-02, A-13).** O callback do
+  Google não termina mais em JSON na API. Toda falha volta para
+  `/auth/callback?error=<código>`, sem `code`. Os códigos possíveis são
+  `access_denied`, `email_not_verified`, `state_mismatch` e `oauth_failed`,
+  e qualquer outro valor deve ser tratado como `oauth_failed`. O que mostrar
+  em cada caso está em `docs/API-CONTRACT.md` ("Erros do callback"). Limpe o
+  `code` e o `error` da URL depois de usar.
 - **`hasPassword` pode passar a `false` depois do login com Google (A-01).**
   Quando a conta local tinha email não verificado, a vinculação apaga a senha
   e as sessões, e `user.hasPassword` volta `false` em `/me` e nas respostas de
@@ -642,38 +870,60 @@ Mudanças da API que o frontend Angular precisa absorver:
   (`refreshToken`), o `Path=/auth` e o `SameSite=Lax` não mudaram. Chrome e
   Firefox aceitam cookie `Secure` em `http://localhost`. No Safari é preciso
   `COOKIE_SECURE=false` no `.env` local da API.
+- **429 no login com `Retry-After` (A-03).** Além do limite por IP, o login
+  tem um limite por email (padrão: 5 falhas em 15 min) que responde 429
+  **mesmo com a senha certa**. A resposta é idêntica à do limite por IP. O
+  front deve mostrar "muitas tentativas, aguarde", sem dizer que a conta foi
+  bloqueada, não deve refazer o login automaticamente, e pode usar o header
+  `Retry-After` (segundos) para exibir o tempo de espera.
+- **Novo 400 no cadastro por senha vazada (A-09).** `POST /auth/signup`
+  responde 400 com `message` (array) contendo
+  `password has appeared in a known data breach; choose a different one`. O
+  formulário deve mostrar uma mensagem própria e pedir outra senha. Há
+  também um 400 raro para senha que passa de 128 caracteres depois da
+  normalização NFKC. A senha deve ser enviada como digitada, sem normalizar
+  no cliente.
+- **Opção "sair de todos os dispositivos" (A-08).** `POST /auth/logout-all`
+  com Bearer e `X-Client-Type: web` responde 204, apaga todas as sessões do
+  usuário e o cookie deste browser. O front deve descartar o access token e
+  limpar o estado local depois do 204.
 - **Swagger não existe em produção (A-10).** `/docs`, `/docs-json` e
   `/docs-yaml` respondem 404 com `NODE_ENV=production`. O front não deve
   depender de `/docs-json` em produção (por exemplo, para gerar clientes em
   runtime). A geração de tipos deve rodar contra a API de dev ou contra os
   contratos em `docs/`.
-- **Tratar `?error=` na rota `/auth/callback` (A-02, A-13).** O callback do
-  Google não termina mais em JSON na API. Toda falha volta para
-  `/auth/callback?error=<código>`, sem `code`. Os códigos possíveis são
-  `access_denied`, `email_not_verified`, `state_mismatch` e `oauth_failed`
-  (o que mostrar em cada caso está em `docs/API-CONTRACT.md`, "Erros do
-  callback").
-- **Interceptor do refresh: deslogar só em 401 (A-04).** Um 401 no
-  `/auth/refresh` encerra a sessão local. Em erro de rede (status 0), o
-  interceptor não desloga: repete o refresh uma vez, porque a renovação pode
-  ter acontecido e a resposta se perdido. O retry cai na janela de tolerância.
-  O exemplo está em `docs/API-CONTRACT.md`.
-- **Cadastro pode receber 400 por senha vazada (A-09).** `POST /auth/signup`
-  responde 400 com a mensagem
-  `password has appeared in a known data breach; choose a different one`.
-  O formulário deve mostrar uma mensagem própria e pedir outra senha.
 
 ## Impacto no App Android
 
-Mudanças da API que o app Android precisa absorver:
+Mudanças da API que o app Android precisa absorver (o contrato de referência
+é `docs/AUTH-CONTRACT-MOBILE.md`):
 
-- **Retry do refresh com o mesmo token (A-04).** O `Authenticator` deve seguir
-  a orientação nova de `docs/AUTH-CONTRACT-MOBILE.md` ("Erro de rede no
-  refresh"). Em erro de rede, mantém o refresh token enviado e repete
-  `/auth/refresh` uma vez com o **mesmo** token, logo em seguida e ainda dentro
-  do lock, para cair na janela de tolerância. Só um 401 limpa a sessão.
-  Um reuso detectado encerra só a sessão daquele aparelho.
-- **Cadastro pode receber 400 por senha vazada (A-09).** `POST /auth/signup`
-  responde 400 com a mensagem
-  `password has appeared in a known data breach; choose a different one`.
-  O formulário deve mostrar uma mensagem própria e pedir outra senha.
+- **`Authenticator` conforme o contrato mobile (A-04).** Um único refresh em
+  voo, protegido por lock. O refresh é chamado por um cliente que não passa
+  pelo próprio `Authenticator`, e o par novo é persistido antes de refazer a
+  request. Só um 401 (ou 404, usuário apagado) no refresh limpa a sessão. Um
+  429 ou um 5xx no refresh não limpam: o app mantém o token e tenta depois.
+  O passo a passo está em "Como isso se traduz no OkHttp".
+- **Janela de tolerância (A-04).** Em erro de rede no refresh, o app mantém o
+  refresh token enviado e repete `/auth/refresh` **uma vez** com o **mesmo**
+  token, logo em seguida e ainda dentro do lock, para cair na janela de
+  `REFRESH_GRACE_SECONDS` (30 s no padrão). Uma segunda repetição conta como
+  reuso. Um reuso detectado encerra só a sessão daquele aparelho. Ver "Erro
+  de rede no refresh".
+- **"Sair de todos os dispositivos" (A-08).** `POST /auth/logout-all` com
+  Bearer e corpo vazio responde 204 e encerra as sessões do app, de outros
+  celulares e do web. Depois do 204, o app descarta os dois tokens e limpa o
+  estado local. Um 401 por access token expirado é tratado pelo
+  `Authenticator` como em qualquer request.
+- **`X-Client-Type: mobile` sempre.** Um `Interceptor` deve pôr o header em
+  toda request. Sem ele, as rotas de token respondem 400 em vez do erro
+  esperado. Um cookie `refreshToken` numa request mobile também dá 400.
+- **429 com `Retry-After` (A-03)**, com o mesmo tratamento do web: mostrar
+  "muitas tentativas, aguarde", não refazer o login automaticamente, e
+  manter a sessão num 429 do refresh.
+- **Novo 400 no cadastro por senha vazada (A-09)**, com o mesmo tratamento
+  do web: mensagem própria e pedido de outra senha. A senha vai como
+  digitada, sem normalizar no app.
+- **Login com Google ainda indisponível no app.** O fluxo atual termina no
+  cliente web. O login nativo (`POST /auth/google/token`) está nas
+  [funcionalidades ausentes](#funcionalidades-ausentes-reauditar-quando-existirem).

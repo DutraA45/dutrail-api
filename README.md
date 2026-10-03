@@ -188,13 +188,36 @@ npm run start:dev           # http://localhost:3000, docs em http://localhost:30
 
 Outros scripts: `prisma:deploy` (aplica migrations sem criar novas — use em
 produção/CI), `prisma:studio` (UI para inspecionar o banco), `build`,
-`start:prod`, `lint`, `format`.
+`start:prod`, `lint`, `format`, `audit:prod` (`npm audit` só das dependências
+de produção).
 
 Os scripts definem o `NODE_ENV` (que vence o do `.env`): `start`, `start:dev`
 e `start:debug` usam `development`; `test*` usam `test`; `start:prod` usa
 `production` — ou seja, aplica as regras de produção acima e não sobe com os
 segredos de dev. Rodando `node dist/main` direto, defina `NODE_ENV` no
 ambiente ou no `.env`.
+
+## Deploy
+
+Pendências operacionais de cada deploy (detalhes em
+`docs/SECURITY-AUDIT.md`, "Riscos aceitos e pendências"):
+
+1. **Migrations antes do código.** Rode `npx prisma migrate deploy` (ou
+   `npm run prisma:deploy`) **antes** de subir um código que traga migration
+   nova, na VM e em qualquer outro banco. Se o banco tiver pooler (no Neon,
+   o host com `-pooler`), use a URL de conexão direta. Código novo sobre
+   schema antigo falha em runtime (ex.: `column familyId does not exist`).
+2. **`sslmode=verify-full`** no `DATABASE_URL`, no lugar de
+   `sslmode=require`. Hoje o `pg` trata `require` como `verify-full`, mas
+   avisa que na próxima versão major `require` passa a seguir a semântica
+   da libpq, que não verifica o certificado.
+3. **Saída HTTPS para `api.pwnedpasswords.com`**, usada pela checagem de
+   senha vazada no cadastro. Sem ela, a checagem falha aberta (o cadastro
+   segue, com o warn `breach_check_unavailable`).
+
+Defina `TRUST_PROXY` **só depois de confirmar a topologia** da VM (ver
+[Rate limit e proxy](#rate-limit-e-proxy)). Até lá, atrás de um proxy, o IP
+dos limites e do log de segurança é o do proxy.
 
 ## Endpoints
 
