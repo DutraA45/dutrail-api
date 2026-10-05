@@ -874,8 +874,11 @@ referência é `docs/API-CONTRACT.md`):
   tem um limite por email (padrão: 5 falhas em 15 min) que responde 429
   **mesmo com a senha certa**. A resposta é idêntica à do limite por IP. O
   front deve mostrar "muitas tentativas, aguarde", sem dizer que a conta foi
-  bloqueada, não deve refazer o login automaticamente, e pode usar o header
-  `Retry-After` (segundos) para exibir o tempo de espera.
+  bloqueada, e não deve refazer o login automaticamente. O header
+  `Retry-After` (segundos) vem na resposta, mas a API não o declara em
+  `Access-Control-Expose-Headers`, então o Angular (outra origem) não
+  consegue lê-lo (conferido em 2026-10-05; ver `docs/API-CONTRACT.md`,
+  "Rate limit").
 - **Novo 400 no cadastro por senha vazada (A-09).** `POST /auth/signup`
   responde 400 com `message` (array) contendo
   `password has appeared in a known data breach; choose a different one`. O
@@ -901,7 +904,8 @@ Mudanças da API que o app Android precisa absorver (o contrato de referência
 - **`Authenticator` conforme o contrato mobile (A-04).** Um único refresh em
   voo, protegido por lock. O refresh é chamado por um cliente que não passa
   pelo próprio `Authenticator`, e o par novo é persistido antes de refazer a
-  request. Só um 401 (ou 404, usuário apagado) no refresh limpa a sessão. Um
+  request. Só um 401 no refresh limpa a sessão (usuário apagado também dá 401
+  no refresh; o 404 vem só de `GET /me`). Um
   429 ou um 5xx no refresh não limpam: o app mantém o token e tenta depois.
   O passo a passo está em "Como isso se traduz no OkHttp".
 - **Janela de tolerância (A-04).** Em erro de rede no refresh, o app mantém o
