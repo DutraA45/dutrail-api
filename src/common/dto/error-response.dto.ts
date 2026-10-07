@@ -5,7 +5,7 @@ import { ApiProperty } from '@nestjs/swagger';
  * Usado no Swagger para documentar as respostas 4xx/5xx.
  */
 export class ErrorResponseDto {
-  @ApiProperty({ example: 400 })
+  @ApiProperty({ example: 400, type: 'integer' })
   statusCode: number;
 
   @ApiProperty({ example: 'Bad Request' })

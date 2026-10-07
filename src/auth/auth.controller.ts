@@ -246,7 +246,9 @@ export class AuthController {
     type: ErrorResponseDto,
   })
   @ApiUnauthorizedResponse({
-    description: 'Refresh token com assinatura inválida',
+    description:
+      'Refresh token com assinatura inválida (ou adulterado) ou expirado. Token desconhecido ou já ' +
+      'revogado não é erro: 204',
     type: ErrorResponseDto,
   })
   @ApiTooManyRequestsResponse(TOO_MANY_REQUESTS)
@@ -292,7 +294,9 @@ export class AuthController {
     description: 'Sessões encerradas (ou não havia nenhuma)',
   })
   @ApiBadRequestResponse({
-    description: CLIENT_TYPE_ERROR,
+    // Sem corpo a validar: o handler não declara @Body(), então o corpo é
+    // ignorado e só o header gera 400.
+    description: 'Header X-Client-Type ausente/inválido',
     type: ErrorResponseDto,
   })
   @ApiUnauthorizedResponse({

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import request from 'supertest';
 import type { TestApp } from './utils/create-app.js';
 import { createAppWithEnv } from './utils/create-app-with-env.js';
@@ -69,6 +70,71 @@ describe('Swagger por NODE_ENV (e2e)', () => {
     it('/docs-json responde o documento OpenAPI', async () => {
       const res = await http().get('/docs-json').expect(200);
       expect(res.body.openapi).toBeTypeOf('string');
+    });
+
+    it('o documento bate com o código (tipos, nulos e respostas)', async () => {
+      const { body: doc } = await http().get('/docs-json').expect(200);
+      const schemas = doc.components.schemas;
+
+      // name e avatarUrl: sempre presentes, string ou null.
+      const user = schemas.UserResponseDto;
+      for (const field of ['name', 'avatarUrl']) {
+        expect(user.properties[field]).toMatchObject({
+          type: 'string',
+          nullable: true,
+        });
+      }
+      expect(user.required).toEqual(
+        expect.arrayContaining(['name', 'avatarUrl']),
+      );
+
+      // Inteiros como integer; metros continuam number.
+      const activity = schemas.ActivityResponseDto.properties;
+      for (const field of [
+        'elapsedTimeSeconds',
+        'movingTimeSeconds',
+        'averageHeartRateBpm',
+        'maxHeartRateBpm',
+        'calories',
+      ]) {
+        expect(activity[field].type, field).toBe('integer');
+      }
+      expect(activity.distanceMeters.type).toBe('number');
+      expect(schemas.ErrorResponseDto.properties.statusCode.type).toBe(
+        'integer',
+      );
+      expect(doc.paths['/activities'].get.parameters[0]).toMatchObject({
+        name: 'limit',
+        schema: { type: 'integer' },
+      });
+
+      // TTLs são padrões configuráveis, sem valor fixo na descrição.
+      expect(JSON.stringify(doc)).not.toMatch(/15 min|7 dias/);
+
+      // 429 também nas rotas que só têm o limite global.
+      for (const [path, method] of [
+        ['/me', 'get'],
+        ['/activities', 'get'],
+        ['/activities/{id}', 'get'],
+      ]) {
+        expect(Object.keys(doc.paths[path][method].responses)).toContain('429');
+      }
+
+      // logout-all ignora o corpo: o 400 é só do header.
+      expect(
+        doc.paths['/auth/logout-all'].post.responses['400'].description,
+      ).not.toMatch(/body|corpo/i);
+      expect(
+        doc.paths['/auth/logout'].post.responses['401'].description,
+      ).toMatch(/expirado/);
+    });
+
+    it('docs/openapi.json está em dia (npm run openapi:generate)', async () => {
+      const res = await http().get('/docs-json').expect(200);
+      const snapshot: unknown = JSON.parse(
+        readFileSync('docs/openapi.json', 'utf8'),
+      );
+      expect(res.body).toEqual(snapshot);
     });
   });
 });

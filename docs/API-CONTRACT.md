@@ -1,5 +1,12 @@
 # Contrato da API de Autenticação — Dutrail
 
+> **OpenAPI versionado.** [`openapi.json`](openapi.json) é um **snapshot** do
+> `/docs-json`, gerado em 2026-10-07 com a app em `development`. Retrata o
+> código daquela data; para o comportamento, a referência continua sendo este
+> documento. `/docs` e `/docs-json` **não existem em produção** (404). Para
+> regenerar depois de mudar a API: `npm run openapi:generate` (compila a app;
+> não precisa de banco nem dos segredos do `.env`).
+
 Referência do cliente **web (Angular)** para autenticação e para os padrões
 comuns a toda a API (Bearer, formato de erro, rate limit, refresh no 401).
 Documentos complementares:
@@ -22,7 +29,7 @@ dessas requisições, com os tokens truncados em `…`.
 > 4. Um único `/auth/refresh` em voo; as outras requests esperam por ele. Três ou mais refreshes simultâneos com o mesmo cookie encerram a sessão.
 > 5. 401 numa rota com Bearer (inclusive `/auth/logout-all`): refresh e repete uma vez. 401 no próprio `/auth/refresh`: sessão encerrada, vai para o login.
 > 6. Erro de rede no refresh: não desloga; repete uma vez, logo em seguida. 429 e 5xx no refresh também não deslogam.
-> 7. 429: "muitas tentativas, aguarde"; o browser não expõe o `Retry-After` ao JS.
+> 7. 429: "muitas tentativas, aguarde"; o header `Retry-After` (segundos) diz quanto e é legível pelo JS.
 > 8. 400: `message` pode ser string ou array. Decida pelo `statusCode` e pela rota, nunca pelo texto.
 > 9. Não fixe TTLs nem limites no código: são padrões configuráveis do servidor.
 > 10. Login com Google: navegue com `window.location`, trate `?code=` e `?error=` em `/auth/callback`, troque o `code` uma vez só.
@@ -46,16 +53,17 @@ transporte muda. O servidor guarda apenas o SHA-256 dos tokens.
 
 Base em desenvolvimento: `http://localhost:3000`. O CORS libera só a origem
 configurada em `FRONTEND_URL` (em desenvolvimento, `http://localhost:4200`),
-com `credentials: true`, e aceita os headers `X-Client-Type`, `Content-Type`
-e `Authorization` no preflight. A URL base de produção não faz parte deste
+com `credentials: true`, aceita os headers `X-Client-Type`, `Content-Type`
+e `Authorization` no preflight e expõe o `Retry-After` ao JS
+(`Access-Control-Expose-Headers`). A URL base de produção não faz parte deste
 documento.
 
 **Swagger.** `/docs` (UI) e `/docs-json` (OpenAPI) existem só com `NODE_ENV`
 diferente de `production`. Em produção respondem 404, e a referência é este
-documento. Não há snapshot do OpenAPI versionado: o gerado hoje tem
-divergências de tipo (por exemplo, `user.name` e `user.avatarUrl` aparecem
-como `object`; o certo é `string | null`). Se gerar tipos a partir do
-`/docs-json` de desenvolvimento, confira-os contra este documento.
+documento. O snapshot versionado é o [`openapi.json`](openapi.json) (ver a
+nota no topo). Os tipos dele batem com este documento: `user.name` e
+`user.avatarUrl` são `string` anulável e sempre presentes (`required`), e
+segundos, FC, calorias, `statusCode` e `limit` são `integer`.
 
 ## `X-Client-Type` por rota
 
@@ -515,7 +523,7 @@ expirado ou emitido por outro servidor. Rota inexistente: 404
 | ------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | 400    | Erro do cliente. Em formulário, mostre uma mensagem própria por campo. Em `X-Client-Type` ou canal errado, é bug do interceptor |
 | 401    | Em rota com Bearer: refresh e repete uma vez. Em `/auth/refresh`: sessão encerrada. Em `/auth/login`: credenciais inválidas. Em `/auth/google/exchange`: login não concluído |
-| 404    | Em `/me`: usuário apagado; limpe a sessão local                                                                                 |
+| 404    | `User not found` em `/me` ou em `POST /activities/import`: usuário apagado, sessão encerrada. Limpe a sessão local e vá para o login; não mostre uma mensagem genérica de "não encontrado" |
 | 409    | No cadastro: "email já em uso", para as duas mensagens                                                                          |
 | 429    | "Muitas tentativas, aguarde". Não refaça a ação automaticamente. Não encerra a sessão                                            |
 | 5xx    | Erro do servidor. Não encerra a sessão; tente de novo mais tarde                                                                |
@@ -553,13 +561,13 @@ sessões abertas (`/auth/refresh`), o login com Google nem outros emails. A
 resposta é idêntica à do limite por IP: o cliente não distingue os dois, e
 não precisa.
 
-**`Retry-After` no browser.** O header vem em todo 429, em segundos. Mas a
-API não o declara em `Access-Control-Expose-Headers`, então o JavaScript de
-outra origem (o Angular) **não consegue lê-lo**: `HttpErrorResponse.headers`
-não o traz. No web, trate o tempo de espera como desconhecido: mostre
-"muitas tentativas, aguarde alguns minutos" e não refaça a request
-automaticamente. Os headers `X-RateLimit-*` também não são expostos ao JS e
-não fazem parte do contrato.
+**`Retry-After` no browser.** O header vem em todo 429, em segundos, e a API
+o declara em `Access-Control-Expose-Headers`: o Angular o lê com
+`HttpErrorResponse.headers.get('Retry-After')`. Use-o para dizer quanto
+esperar ("tente de novo em 2 minutos"), não para refazer a request
+automaticamente. Se vier ausente ou não numérico (por exemplo, um 429 de um
+proxy), trate o tempo como desconhecido. Os headers `X-RateLimit-*` não são
+expostos ao JS e não fazem parte do contrato.
 
 Em qualquer 429: não diga que a conta foi bloqueada, não repita a request
 automaticamente e não limpe a sessão. Um 429 em `/auth/refresh` não é sessão
@@ -687,8 +695,8 @@ o que o servidor hoje não oferece.
 - **Cookie `googleOAuthState`.** É do servidor; o cliente não o manipula.
 - **Valores fixos.** TTLs, janela de tolerância, limites de rate e do login
   por conta são padrões configuráveis; não os codifique.
-- **`Retry-After` e `X-RateLimit-*` no browser.** Não são legíveis pelo JS
-  (ver [Rate limit](#rate-limit)).
+- **`X-RateLimit-*` no browser.** Não são legíveis pelo JS nem fazem parte
+  do contrato; só o `Retry-After` é (ver [Rate limit](#rate-limit)).
 - **Logout invalidando o access token.** Ele vale até expirar; descarte-o.
 - **`hasPassword` imutável.** Pode passar a `false` depois de um login com
   Google.
@@ -706,7 +714,6 @@ Não implementadas; o cliente não deve contar com elas:
 - **Login nativo com Google no Android** (`POST /auth/google/token` com o
   `idToken`). Hoje só existe o fluxo de redirect, que termina no web.
 - **`SameSite=None` configurável**: `Lax` é fixo no código.
-- **`Retry-After` legível no browser** (falta `Access-Control-Expose-Headers`).
 
 ## Histórico de mudanças
 
@@ -753,5 +760,21 @@ inicial do contrato (2026-09-23). Datas dos commits na `main`; os códigos
       token deve usar `user.email` ou `GET /me`.
 - [ ] **2026-10-05 — Revisão deste contrato.** Sem mudança de servidor, mas
       com regras novas para o cliente: `/auth/logout-all` dispara refresh no
-      401 (compare caminhos exatos, não prefixo `/auth/`); o `Retry-After` não
-      é legível no browser; o 409 do cadastro tem duas mensagens.
+      401 (compare caminhos exatos, não prefixo `/auth/`); o 409 do cadastro
+      tem duas mensagens. Nesta data o `Retry-After` não era legível no
+      browser; deixou de valer em 2026-10-07 (item abaixo).
+- [ ] **2026-10-07 — `Retry-After` legível no browser.** A API passou a
+      declarar `Access-Control-Expose-Headers: Retry-After`. No 429, o front
+      pode mostrar quanto esperar
+      (`HttpErrorResponse.headers.get('Retry-After')`, em segundos). Continua
+      valendo: não repetir a request automaticamente e não encerrar a sessão.
+- [ ] **2026-10-07 — Importação com usuário apagado.**
+      `POST /activities/import` com o access token de um usuário apagado
+      responde **404 `User not found`** (antes, 500), como o `GET /me`. Trate
+      como sessão encerrada: limpe a sessão local e vá para o login, sem
+      mensagem genérica de "não encontrado".
+- [ ] **2026-10-07 — Snapshot do OpenAPI.** [`openapi.json`](openapi.json)
+      passa a ser versionado, com os tipos corrigidos (`user.name` e
+      `user.avatarUrl` como `string | null`; inteiros como `integer`). Tipos
+      gerados antes a partir do `/docs-json` de desenvolvimento devem ser
+      refeitos.

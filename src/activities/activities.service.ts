@@ -4,6 +4,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { Prisma, type Activity } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -15,6 +16,8 @@ import { parseFitActivity } from './fit/fit-activity-parser.js';
 import { ActivityFileStorageService } from './storage/activity-file-storage.service.js';
 
 export const DUPLICATE_IMPORT_MESSAGE = 'Esta atividade já foi importada.';
+/** A do GET /me para o mesmo caso (token válido de usuário apagado). */
+export const USER_NOT_FOUND_MESSAGE = 'User not found';
 
 export interface ActivityPage {
   items: Activity[];
@@ -131,13 +134,18 @@ export class ActivitiesService {
       });
     } catch (error) {
       await this.deleteOrphanFile(fitFileKey);
-      // Duas importações simultâneas do mesmo arquivo: as duas passam pela
-      // checagem acima, e o índice único barra a segunda.
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
-        throw new ConflictException(DUPLICATE_IMPORT_MESSAGE);
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        // Duas importações simultâneas do mesmo arquivo: as duas passam pela
+        // checagem acima, e o índice único barra a segunda.
+        if (error.code === 'P2002') {
+          throw new ConflictException(DUPLICATE_IMPORT_MESSAGE);
+        }
+        // Chave estrangeira: a única da tabela é o `userId`, então o usuário
+        // do token (ainda válido, é stateless) foi apagado depois da emissão.
+        // Mesma resposta do GET /me nesse caso.
+        if (error.code === 'P2003') {
+          throw new NotFoundException(USER_NOT_FOUND_MESSAGE);
+        }
       }
       throw error;
     }

@@ -3,7 +3,7 @@
 | Campo       | Valor |
 | ----------- | ----- |
 | Data        | Auditoria: 2026-09-30. Fechamento: 2026-10-02 |
-| Commit      | Auditoria: `9824177` (branch `main`, árvore limpa). Fechamento: `349cfd3` (branch `chore/security-deps-closing`, igual a `main`), mais as mudanças deste fechamento ainda não commitadas (`package.json`, `package-lock.json`, este relatório e o `README.md`) |
+| Commit      | Auditoria: `9824177` (branch `main`, árvore limpa). Fechamento: conferido sobre `349cfd3` (branch `chore/security-deps-closing`, igual a `main` naquele momento); as mudanças do próprio fechamento (`package.json`, `package-lock.json`, este relatório e o `README.md`) entraram nos commits `3b24894` e `2f63f3a`, da mesma branch |
 | Tipo        | Auditoria: revisão estática, somente leitura (código, schema, migrations, contratos, `node_modules` das libs de auth) + `npm audit`. Fechamento: conferência de cada achado no código e no `git log`, `npm audit`, e execução de `tsc`, lint, prettier, build e testes unitários e e2e (estes num Postgres descartável, em container local) |
 | Referências | OWASP ASVS 4.0.3 (L1/L2: V2, V3, V4, V7, V8, V9, V13), RFC 9700 (OAuth 2.0 Security BCP), RFC 8252 (OAuth para apps nativos) |
 | Fora        | Frontend Angular, app Android, infraestrutura de produção (ver [Não verificado](#não-verificado)) |
@@ -875,10 +875,9 @@ referência é `docs/API-CONTRACT.md`):
   **mesmo com a senha certa**. A resposta é idêntica à do limite por IP. O
   front deve mostrar "muitas tentativas, aguarde", sem dizer que a conta foi
   bloqueada, e não deve refazer o login automaticamente. O header
-  `Retry-After` (segundos) vem na resposta, mas a API não o declara em
-  `Access-Control-Expose-Headers`, então o Angular (outra origem) não
-  consegue lê-lo (conferido em 2026-10-05; ver `docs/API-CONTRACT.md`,
-  "Rate limit").
+  `Retry-After` (segundos) vem na resposta e, desde 2026-10-07, a API o
+  declara em `Access-Control-Expose-Headers`: o Angular pode lê-lo para
+  dizer quanto esperar (ver `docs/API-CONTRACT.md`, "Rate limit").
 - **Novo 400 no cadastro por senha vazada (A-09).** `POST /auth/signup`
   responde 400 com `message` (array) contendo
   `password has appeared in a known data breach; choose a different one`. O

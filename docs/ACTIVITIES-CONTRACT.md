@@ -412,6 +412,7 @@ próprio nesses casos.
 | 400    | Mais de um arquivo no campo `file`                                              | `Too many files`                                                   |
 | 400    | Mais de 10 campos de texto                                                      | `Too many fields`                                                  |
 | 401    | Access token ausente, inválido ou expirado                                      | `Unauthorized`                                                     |
+| 404    | Access token válido de um usuário que foi apagado (como no `GET /me`)           | `User not found`. Nada é gravado; ver abaixo                       |
 | 409    | O mesmo arquivo já foi importado por este usuário                               | `Esta atividade já foi importada.`                                 |
 | 413    | Arquivo maior que 10 MiB                                                        | `File too large`                                                   |
 | 429    | Mais de **20 importações por minuto** do mesmo IP                               | `ThrottlerException: Too Many Requests`                            |
@@ -441,17 +442,23 @@ Lembretes:
 - **429**: o rate limit vem antes da autenticação, então pode chegar mesmo com
   o token expirado. Mostre "muitas tentativas, aguarde", não repita
   automaticamente e não encerre a sessão. O header `Retry-After` (segundos)
-  vem na resposta; o app Android pode lê-lo, mas o browser não o expõe ao
-  Angular (ver [`API-CONTRACT.md` § Rate limit](API-CONTRACT.md#rate-limit)).
+  vem na resposta e pode ser lido pelo app Android e pelo Angular (a API o
+  expõe ao browser em `Access-Control-Expose-Headers`; ver
+  [`API-CONTRACT.md` § Rate limit](API-CONTRACT.md#rate-limit)).
 - **`path`** traz a query string (ex. `/activities?limit=101`).
 - Decida pelo `statusCode`. A exceção são as mensagens em português da
   importação (400 de conteúdo e 409), que podem ser **exibidas** como vieram;
   mesmo assim, não as compare para decidir comportamento.
 
 **Usuário apagado com access token ainda válido** (caso de borda): a
-listagem devolve `200` vazio, o detalhe `404` (as atividades são apagadas
-junto com o usuário) e a importação responde **500** `Internal server error`.
-Quem detecta o usuário apagado é o `GET /me` (404).
+listagem devolve `200` vazio, o detalhe `404` `Activity not found` (as
+atividades são apagadas junto com o usuário) e a importação responde **404
+`User not found`**, a mesma resposta do `GET /me`. Na importação, nada fica
+gravado: o arquivo enviado é descartado. O cliente trata o `User not found`
+como no `GET /me`: sessão encerrada, limpa a sessão local e vai para o login,
+sem mostrar uma mensagem genérica de "não encontrado". A listagem e o
+detalhe não distinguem esse caso; quem o detecta é o `GET /me` ou a
+importação.
 
 ## O que o cliente não deve assumir
 
@@ -485,7 +492,7 @@ mantidos. O que muda para ele:
 | 4   | Atividade de outro usuário    | 404 ou 403                                      | Sempre **404**                                                               | O tratamento de 403 pode ser removido (inofensivo se ficar)                           |
 | 5   | Id malformado                 | não especificado                                | 404 (não 400)                                                                | Nenhuma: cai no mesmo estado de "não encontrada"                                      |
 | 6   | Parâmetros de query extras    | não especificado                                | 400                                                                          | Não enviar parâmetros além de `limit`/`cursor`                                        |
-| 7   | `POST /activities/import`     | 201 com a `Activity`; 400 para arquivo inválido | Como proposto, mais **409** para reimportação e **413** acima de 10 MiB      | Remover o `TODO(api)` e o override de 404; **adicionar overrides de 409 e 413** (ver abaixo) |
+| 7   | `POST /activities/import`     | 201 com a `Activity`; 400 para arquivo inválido | Como proposto, mais **409** para reimportação, **413** acima de 10 MiB e **404 `User not found`** quando o token ainda é válido mas o usuário foi apagado | Remover o `TODO(api)`; **adicionar overrides de 409 e 413** (ver abaixo); tratar o 404 `User not found` como **sessão encerrada** (limpar a sessão local e ir para o login), não com uma mensagem genérica de "não encontrado" |
 | 8   | Semântica dos números         | `number`                                        | Segundos, FC e `calories` (kcal) são **inteiros**; metros podem ter decimais | Nenhuma no tipo TS; só não esperar frações de segundo                                 |
 
 Sobre o 409 na importação: o `describeApiError` do `dutrail-web` traduzia
