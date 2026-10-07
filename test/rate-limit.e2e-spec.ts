@@ -314,6 +314,56 @@ describe('Limites por rota (e2e)', () => {
   );
 });
 
+describe('CORS nas respostas 429 (e2e)', () => {
+  // FRONTEND_URL do .env.test.
+  const FRONTEND = 'http://localhost:4200';
+  const EVIL = 'https://evil.example';
+  let t: TestApp;
+
+  /** Nomes do Access-Control-Expose-Headers, em minúsculas. */
+  const exposed = (res: Response) =>
+    String(res.headers['access-control-expose-headers'] ?? '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase());
+
+  /** Duas GET /me: com limite global 1/min, a segunda é sempre 429. */
+  async function throttledMe(origin: string): Promise<Response> {
+    const get = () =>
+      request(t.app.getHttpServer()).get('/me').set('Origin', origin);
+    await get();
+    return get();
+  }
+
+  beforeAll(async () => {
+    t = await createAppWithEnv(
+      { THROTTLE_LIMIT: '1' },
+      { keepThrottling: true },
+    );
+  });
+
+  afterAll(async () => {
+    await t.close();
+    vi.unstubAllEnvs();
+  });
+
+  it('origem permitida: o Retry-After é legível pelo JS (Access-Control-Expose-Headers)', async () => {
+    const res = await throttledMe(FRONTEND);
+
+    expectThrottled(res, '/me');
+    expect(res.headers['access-control-allow-origin']).toBe(FRONTEND);
+    expect(res.headers['access-control-allow-credentials']).toBe('true');
+    expect(exposed(res)).toContain('retry-after');
+  });
+
+  it('origem não permitida: o 429 continua sem refletir a origem', async () => {
+    const res = await throttledMe(EVIL);
+
+    expectThrottled(res, '/me');
+    expect(res.headers['access-control-allow-origin']).not.toBe(EVIL);
+    expect(res.headers['access-control-allow-origin']).not.toBe('*');
+  });
+});
+
 describe('TRUST_PROXY (e2e)', () => {
   /** O ip que o log de segurança registrou para um login com o header dado. */
   async function ipSeenWith(

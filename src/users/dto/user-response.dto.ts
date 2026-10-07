@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 import type { User } from '../../generated/prisma/client.js';
 
 /**
@@ -12,12 +12,15 @@ export class UserResponseDto {
   @ApiProperty({ example: 'ana@example.com' })
   email: string;
 
-  @ApiPropertyOptional({ example: 'Ana Silva', nullable: true })
+  // Sempre presentes (`null` quando não há valor): required + nullable, com
+  // `type` explícito, que o tipo `string | null` não informa ao Swagger.
+  @ApiProperty({ example: 'Ana Silva', nullable: true, type: String })
   name: string | null;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     example: 'https://lh3.googleusercontent.com/a/...',
     nullable: true,
+    type: String,
   })
   avatarUrl: string | null;
 

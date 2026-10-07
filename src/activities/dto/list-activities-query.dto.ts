@@ -16,6 +16,7 @@ export const MAX_ACTIVITIES_LIMIT = 100;
 export class ListActivitiesQueryDto {
   @ApiPropertyOptional({
     description: 'Quantidade máxima de itens na página.',
+    type: 'integer',
     minimum: 1,
     maximum: MAX_ACTIVITIES_LIMIT,
     default: DEFAULT_ACTIVITIES_LIMIT,

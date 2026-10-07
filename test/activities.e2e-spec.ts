@@ -617,6 +617,44 @@ describe('Activities (e2e)', () => {
         create.mockRestore();
       });
     });
+
+    describe('usuário apagado depois de emitir o token', () => {
+      it('404 User not found, como o GET /me, e o arquivo enviado é apagado do storage', async () => {
+        const put = vi.spyOn(t.storage, 'put');
+        await t.prisma.user.delete({ where: { id: ana.id } });
+
+        const res = await importFit(ana).expect(404);
+        const me = await ana.get('/me').expect(404);
+
+        expect(res.body).toEqual({
+          statusCode: 404,
+          error: 'Not Found',
+          message: 'User not found',
+          path: '/activities/import',
+          timestamp: expect.any(String),
+        });
+        expect(res.body.message).toBe(me.body.message);
+        // Nada do erro do banco chega ao cliente.
+        expect(JSON.stringify(res.body)).not.toMatch(
+          /foreign|constraint|fkey|prisma|P2003/i,
+        );
+        // O upload aconteceu (o usuário só "some" no INSERT) e foi desfeito.
+        expect(put).toHaveBeenCalledOnce();
+        expect(t.storage.objects.size).toBe(0);
+        expect(await countActivities()).toBe(0);
+        put.mockRestore();
+      });
+
+      it('as rotas de leitura não dão 500: listagem vazia e detalhe 404', async () => {
+        const activity = await createActivity(ana.id);
+        await t.prisma.user.delete({ where: { id: ana.id } });
+
+        const list = await ana.get('/activities').expect(200);
+        expect(list.body).toEqual({ items: [], nextCursor: null });
+        const detail = await ana.get(`/activities/${activity.id}`).expect(404);
+        expect(detail.body.message).toBe('Activity not found');
+      });
+    });
   });
 
   it('apagar o usuário apaga as atividades dele (onDelete: Cascade)', async () => {

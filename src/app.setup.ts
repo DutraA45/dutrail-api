@@ -115,9 +115,13 @@ export function configureApp(app: INestApplication): void {
   // sem ele o browser não envia o cookie nem aceita o Set-Cookie cross-origin.
   // Exige origem explícita — com credentials, o wildcard '*' é rejeitado pelo
   // próprio browser.
+  //
+  // `exposedHeaders`: sem ele o JS de outra origem não lê o `Retry-After` dos
+  // 429 (o browser só expõe os headers "simples" por padrão).
   app.enableCors({
     origin: config.get('FRONTEND_URL', { infer: true }),
     credentials: true,
+    exposedHeaders: ['Retry-After'],
   });
 
   // De quem aceitar o X-Forwarded-For para definir o req.ip, que o rate limit

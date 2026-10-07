@@ -5,6 +5,7 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
@@ -32,6 +33,11 @@ export class UsersController {
   })
   @ApiNotFoundResponse({
     description: 'Usuário do token não existe mais',
+    type: ErrorResponseDto,
+  })
+  @ApiTooManyRequestsResponse({
+    description:
+      'Rate limit excedido (limite global por IP, padrão configurável)',
     type: ErrorResponseDto,
   })
   async me(

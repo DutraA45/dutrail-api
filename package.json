@@ -25,6 +25,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
+    "openapi:generate": "nest build && node scripts/generate-openapi.mjs",
     "audit:prod": "npm audit --omit=dev"
   },
   "dependencies": {

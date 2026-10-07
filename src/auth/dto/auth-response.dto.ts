@@ -4,10 +4,12 @@ import type { AuthResult } from '../auth.service.js';
 import type { TokenPair } from '../token.service.js';
 
 const ACCESS_TOKEN_DESCRIPTION =
-  'JWT de curta duração (15 min). Enviar em `Authorization: Bearer <token>`.';
+  'JWT de curta duração (padrão configurável no servidor; não fixe a validade no cliente). ' +
+  'Enviar em `Authorization: Bearer <token>`.';
 
 const REFRESH_TOKEN_DESCRIPTION =
-  'JWT de longa duração (7 dias), de uso único: cada /auth/refresh o invalida e devolve outro. ' +
+  'JWT de longa duração (padrão configurável no servidor), de uso único: cada /auth/refresh o ' +
+  'invalida e devolve outro. ' +
   'Presente apenas quando X-Client-Type é `mobile` — no fluxo web ele vai no cookie httpOnly.';
 
 /** Corpo de /auth/refresh para clientes **web** (o refresh vai no cookie). */

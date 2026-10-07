@@ -50,6 +50,13 @@ export const EMPTY_FILE_MESSAGE = 'O arquivo .fit está vazio.';
  */
 const IMPORT_THROTTLE = { default: { limit: 20, ttl: 60_000 } };
 
+/** As rotas de leitura ficam no limite global (THROTTLE_*). */
+const GLOBAL_TOO_MANY_REQUESTS = {
+  description:
+    'Rate limit excedido (limite global por IP, padrão configurável)',
+  type: ErrorResponseDto,
+};
+
 /** O que o multer (armazenamento em memória, padrão do Nest) entrega. */
 interface UploadedFitFile {
   buffer: Buffer;
@@ -82,6 +89,7 @@ export class ActivitiesController {
       '`limit` fora de 1..100, `cursor` inválido ou parâmetro desconhecido',
     type: ErrorResponseDto,
   })
+  @ApiTooManyRequestsResponse(GLOBAL_TOO_MANY_REQUESTS)
   async list(
     @CurrentUser() current: AuthenticatedUser,
     @Query() query: ListActivitiesQueryDto,
@@ -118,6 +126,11 @@ export class ActivitiesController {
   })
   @ApiConflictResponse({
     description: 'O mesmo arquivo já foi importado por este usuário',
+    type: ErrorResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Usuário do token não existe mais (como em `GET /me`); nada foi criado',
     type: ErrorResponseDto,
   })
   @ApiPayloadTooLargeResponse({
@@ -165,6 +178,7 @@ export class ActivitiesController {
       'Atividade inexistente **ou de outro usuário** — mesma resposta nos dois casos',
     type: ErrorResponseDto,
   })
+  @ApiTooManyRequestsResponse(GLOBAL_TOO_MANY_REQUESTS)
   async findOne(
     @CurrentUser() current: AuthenticatedUser,
     @Param('id') id: string,

@@ -31,6 +31,7 @@ export class ActivityResponseDto {
   @ApiProperty({
     description: 'Tempo total em segundos, pausas incluídas.',
     example: 3125,
+    type: 'integer',
   })
   elapsedTimeSeconds: number;
 
@@ -38,7 +39,7 @@ export class ActivityResponseDto {
     description: 'Tempo em movimento, em segundos.',
     example: 3010,
     nullable: true,
-    type: Number,
+    type: 'integer',
   })
   movingTimeSeconds: number | null;
 
@@ -48,17 +49,17 @@ export class ActivityResponseDto {
   @ApiProperty({ example: 87.2, nullable: true, type: Number })
   elevationGainMeters: number | null;
 
-  @ApiProperty({ example: 152, nullable: true, type: Number })
+  @ApiProperty({ example: 152, nullable: true, type: 'integer' })
   averageHeartRateBpm: number | null;
 
-  @ApiProperty({ example: 178, nullable: true, type: Number })
+  @ApiProperty({ example: 178, nullable: true, type: 'integer' })
   maxHeartRateBpm: number | null;
 
   @ApiProperty({
     description: 'Quilocalorias (kcal).',
     example: 689,
     nullable: true,
-    type: Number,
+    type: 'integer',
   })
   calories: number | null;
 

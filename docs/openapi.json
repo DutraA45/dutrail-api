@@ -1,0 +1,1185 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/me": {
+      "get": {
+        "operationId": "UsersController_me",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token ausente, inválido ou expirado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Usuário do token não existe mais",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido (limite global por IP, padrão configurável)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Retorna o usuário autenticado",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/auth/signup": {
+      "post": {
+        "operationId": "AuthController_signup",
+        "parameters": [
+          {
+            "name": "X-Client-Type",
+            "in": "header",
+            "description": "Define o transporte do refresh token: `web` usa cookie httpOnly, `mobile` usa o corpo JSON. Ausente ou inválido retorna 400.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "web",
+                "mobile"
+              ],
+              "example": "web"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignupDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Tokens emitidos. `web`: refreshToken **não** vem no corpo — vai no cookie httpOnly `refreshToken`. `mobile`: refreshToken vem no corpo, sem nenhum `Set-Cookie`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AuthWebResponseDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AuthMobileResponseDto"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body inválido ou header X-Client-Type ausente/inválido, senha acima de 128 caracteres depois do NFKC, ou senha presente em vazamentos conhecidos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Email já cadastrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Cadastro com email e senha",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "operationId": "AuthController_login",
+        "parameters": [
+          {
+            "name": "X-Client-Type",
+            "in": "header",
+            "description": "Define o transporte do refresh token: `web` usa cookie httpOnly, `mobile` usa o corpo JSON. Ausente ou inválido retorna 400.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "web",
+                "mobile"
+              ],
+              "example": "web"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tokens emitidos. `web`: refreshToken **não** vem no corpo — vai no cookie httpOnly `refreshToken`. `mobile`: refreshToken vem no corpo, sem nenhum `Set-Cookie`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AuthWebResponseDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AuthMobileResponseDto"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body inválido ou header X-Client-Type ausente/inválido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Credenciais inválidas",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido: por IP (10/min) ou por conta (LOGIN_MAX_FAILURES falhas para o mesmo email em LOGIN_FAILURE_WINDOW_MINUTES; vale até a senha certa, até a janela acabar). As duas respostas são iguais, exista ou não a conta.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Login com email e senha",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "description": "Lê o refresh token do cookie httpOnly (`web`) ou do corpo (`mobile`). O token enviado é invalidado (rotação). Por REFRESH_GRACE_SECONDS (padrão 30 s) ele ainda pode ser repetido uma vez (resposta perdida) e recebe um par novo da mesma sessão; fora disso, reapresentá-lo é reuso e encerra a sessão daquele dispositivo (as outras continuam).",
+        "operationId": "AuthController_refresh",
+        "parameters": [
+          {
+            "name": "X-Client-Type",
+            "in": "header",
+            "description": "Define o transporte do refresh token: `web` usa cookie httpOnly, `mobile` usa o corpo JSON. Ausente ou inválido retorna 400.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "web",
+                "mobile"
+              ],
+              "example": "web"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Novo par de tokens. `web`: refreshToken **não** vem no corpo — vai no cookie httpOnly `refreshToken`. `mobile`: refreshToken vem no corpo, sem nenhum `Set-Cookie`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AccessTokenDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/TokenPairDto"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body inválido ou header X-Client-Type ausente/inválido, ou refresh token enviado no canal errado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refresh token ausente, inválido, expirado ou revogado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Troca um refresh token por um novo par de tokens",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "description": "Revoga o token no banco e, no fluxo web, apaga o cookie. O access token continua válido até expirar (é stateless); o cliente deve descartá-lo.",
+        "operationId": "AuthController_logout",
+        "parameters": [
+          {
+            "name": "X-Client-Type",
+            "in": "header",
+            "description": "Define o transporte do refresh token: `web` usa cookie httpOnly, `mobile` usa o corpo JSON. Ausente ou inválido retorna 400.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "web",
+                "mobile"
+              ],
+              "example": "web"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Refresh token revogado (ou já não existia)"
+          },
+          "400": {
+            "description": "Body inválido ou header X-Client-Type ausente/inválido, ou refresh token enviado no canal errado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refresh token com assinatura inválida (ou adulterado) ou expirado. Token desconhecido ou já revogado não é erro: 204",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Invalida o refresh token atual",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/logout-all": {
+      "post": {
+        "description": "Apaga todos os refresh tokens do usuário (todas as sessões, web e mobile) e os códigos de troca do Google pendentes; no fluxo web, também apaga o cookie deste dispositivo. Os outros dispositivos recebem 401 no próximo refresh. O access token atual (e os já emitidos) continua válido até expirar (é stateless); o cliente deve descartá-lo. Idempotente: sem sessões, também responde 204.",
+        "operationId": "AuthController_logoutAll",
+        "parameters": [
+          {
+            "name": "X-Client-Type",
+            "in": "header",
+            "description": "Define o transporte do refresh token: `web` usa cookie httpOnly, `mobile` usa o corpo JSON. Ausente ou inválido retorna 400.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "web",
+                "mobile"
+              ],
+              "example": "web"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Sessões encerradas (ou não havia nenhuma)"
+          },
+          "400": {
+            "description": "Header X-Client-Type ausente/inválido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token ausente, inválido ou expirado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Encerra todas as sessões do usuário (todos os dispositivos)",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/google": {
+      "get": {
+        "description": "Abra esta URL no browser (window.location); ela redireciona para a tela de consentimento do Google e seta um cookie curto (state + PKCE) que o callback confere. Não aceita header X-Client-Type.",
+        "operationId": "AuthController_googleLogin",
+        "parameters": [],
+        "responses": {
+          "302": {
+            "description": "Redirect para accounts.google.com"
+          }
+        },
+        "summary": "Inicia o login com Google",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/google/exchange": {
+      "post": {
+        "operationId": "AuthController_googleExchange",
+        "parameters": [
+          {
+            "name": "X-Client-Type",
+            "in": "header",
+            "description": "Define o transporte do refresh token: `web` usa cookie httpOnly, `mobile` usa o corpo JSON. Ausente ou inválido retorna 400.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "web",
+                "mobile"
+              ],
+              "example": "web"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExchangeCodeDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tokens emitidos. `web`: refreshToken **não** vem no corpo — vai no cookie httpOnly `refreshToken`. `mobile`: refreshToken vem no corpo, sem nenhum `Set-Cookie`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AuthWebResponseDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AuthMobileResponseDto"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body inválido ou header X-Client-Type ausente/inválido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Código inválido, expirado ou já usado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Troca o código do callback do Google por tokens",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/activities": {
+      "get": {
+        "description": "Mais recentes primeiro (`startedAt` decrescente), paginado por cursor.",
+        "operationId": "ActivitiesController_list",
+        "parameters": [
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "description": "Quantidade máxima de itens na página.",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "integer"
+            }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Valor opaco de `nextCursor` da página anterior. Omita para a primeira página.",
+            "schema": {
+              "example": "WyIyMDI2LTA5LTIwVDA3OjE1OjMwLjAwMFoiLCJjN2EzZDJmNCJd",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityPageDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`limit` fora de 1..100, `cursor` inválido ou parâmetro desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token ausente, inválido ou expirado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido (limite global por IP, padrão configurável)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Lista as atividades do usuário autenticado",
+        "tags": [
+          "activities"
+        ]
+      }
+    },
+    "/activities/import": {
+      "post": {
+        "description": "`multipart/form-data` com o arquivo no campo `file`, até 10485760 bytes (10 MiB). O arquivo original é guardado. Responde com a atividade criada, no mesmo formato de `GET /activities/:id`.",
+        "operationId": "ActivitiesController_import",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Arquivo ausente, vazio, inválido/corrompido ou que não é de uma atividade",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token ausente, inválido ou expirado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Usuário do token não existe mais (como em `GET /me`); nada foi criado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "O mesmo arquivo já foi importado por este usuário",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Arquivo maior que 10 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Mais de 20 importações por minuto (por IP)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Falha ao guardar o arquivo; nada foi criado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Cria uma atividade a partir de um arquivo .fit",
+        "tags": [
+          "activities"
+        ]
+      }
+    },
+    "/activities/{id}": {
+      "get": {
+        "operationId": "ActivitiesController_findOne",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token ausente, inválido ou expirado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Atividade inexistente **ou de outro usuário** — mesma resposta nos dois casos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido (limite global por IP, padrão configurável)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Detalhe de uma atividade do usuário autenticado",
+        "tags": [
+          "activities"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Dutrail API",
+    "description": "API do Dutrail (atividades ao ar livre): autenticação e atividades.",
+    "version": "0.1",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http"
+      }
+    },
+    "schemas": {
+      "UserResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "c7a3d2f4-8b1e-4c7a-9f3d-2e1b5a6c8d9e"
+          },
+          "email": {
+            "type": "string",
+            "example": "ana@example.com"
+          },
+          "name": {
+            "type": "string",
+            "example": "Ana Silva",
+            "nullable": true
+          },
+          "avatarUrl": {
+            "type": "string",
+            "example": "https://lh3.googleusercontent.com/a/...",
+            "nullable": true
+          },
+          "emailVerified": {
+            "type": "boolean",
+            "example": true
+          },
+          "hasPassword": {
+            "type": "boolean",
+            "description": "Indica se a conta tem senha (false para contas criadas só via Google).",
+            "example": true
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string",
+            "example": "2026-09-21T12:00:00.000Z"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "name",
+          "avatarUrl",
+          "emailVerified",
+          "hasPassword",
+          "createdAt"
+        ]
+      },
+      "ErrorResponseDto": {
+        "type": "object",
+        "properties": {
+          "statusCode": {
+            "type": "integer",
+            "example": 400
+          },
+          "error": {
+            "type": "string",
+            "example": "Bad Request"
+          },
+          "message": {
+            "description": "Mensagem única ou lista de mensagens (erros de validação).",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ],
+            "example": [
+              "email must be an email"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "example": "/auth/login"
+          },
+          "timestamp": {
+            "type": "string",
+            "example": "2026-09-21T12:00:00.000Z"
+          }
+        },
+        "required": [
+          "statusCode",
+          "error",
+          "message",
+          "path",
+          "timestamp"
+        ]
+      },
+      "AuthWebResponseDto": {
+        "type": "object",
+        "properties": {
+          "accessToken": {
+            "type": "string",
+            "description": "JWT de curta duração (padrão configurável no servidor; não fixe a validade no cliente). Enviar em `Authorization: Bearer <token>`."
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserResponseDto"
+          }
+        },
+        "required": [
+          "accessToken",
+          "user"
+        ]
+      },
+      "AuthMobileResponseDto": {
+        "type": "object",
+        "properties": {
+          "accessToken": {
+            "type": "string",
+            "description": "JWT de curta duração (padrão configurável no servidor; não fixe a validade no cliente). Enviar em `Authorization: Bearer <token>`."
+          },
+          "refreshToken": {
+            "type": "string",
+            "description": "JWT de longa duração (padrão configurável no servidor), de uso único: cada /auth/refresh o invalida e devolve outro. Presente apenas quando X-Client-Type é `mobile` — no fluxo web ele vai no cookie httpOnly."
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserResponseDto"
+          }
+        },
+        "required": [
+          "accessToken",
+          "refreshToken",
+          "user"
+        ]
+      },
+      "SignupDto": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "example": "ana@example.com"
+          },
+          "password": {
+            "type": "string",
+            "example": "S3nh@Forte!",
+            "minLength": 8,
+            "maxLength": 128,
+            "description": "Mínimo 8 caracteres. O limite superior evita hashes desnecessariamente caros."
+          },
+          "name": {
+            "type": "string",
+            "example": "Ana Silva",
+            "maxLength": 100
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ]
+      },
+      "LoginDto": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "example": "ana@example.com"
+          },
+          "password": {
+            "type": "string",
+            "example": "S3nh@Forte!"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ]
+      },
+      "AccessTokenDto": {
+        "type": "object",
+        "properties": {
+          "accessToken": {
+            "type": "string",
+            "description": "JWT de curta duração (padrão configurável no servidor; não fixe a validade no cliente). Enviar em `Authorization: Bearer <token>`."
+          }
+        },
+        "required": [
+          "accessToken"
+        ]
+      },
+      "TokenPairDto": {
+        "type": "object",
+        "properties": {
+          "accessToken": {
+            "type": "string",
+            "description": "JWT de curta duração (padrão configurável no servidor; não fixe a validade no cliente). Enviar em `Authorization: Bearer <token>`."
+          },
+          "refreshToken": {
+            "type": "string",
+            "description": "JWT de longa duração (padrão configurável no servidor), de uso único: cada /auth/refresh o invalida e devolve outro. Presente apenas quando X-Client-Type é `mobile` — no fluxo web ele vai no cookie httpOnly."
+          }
+        },
+        "required": [
+          "accessToken",
+          "refreshToken"
+        ]
+      },
+      "RefreshTokenDto": {
+        "type": "object",
+        "properties": {
+          "refreshToken": {
+            "type": "string",
+            "description": "Obrigatório quando X-Client-Type é `mobile`. Deve ser omitido quando é `web` (nesse caso o token é lido do cookie httpOnly).",
+            "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+          }
+        }
+      },
+      "ExchangeCodeDto": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Código de uso único recebido na URL de redirect após o login com Google.",
+            "example": "QmFzZTY0VXJsUmFuZG9tQ29kZS4uLg"
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "ActivitySport": {
+        "type": "string",
+        "enum": [
+          "running",
+          "cycling",
+          "walking",
+          "hiking",
+          "swimming",
+          "other"
+        ]
+      },
+      "ActivityResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "0b8e6f2a-3c1d-4e5f-9a7b-1c2d3e4f5a6b"
+          },
+          "userId": {
+            "type": "string",
+            "description": "Dono da atividade (sempre o usuário do token).",
+            "example": "c7a3d2f4-8b1e-4c7a-9f3d-2e1b5a6c8d9e"
+          },
+          "name": {
+            "type": "string",
+            "example": "Corrida matinal"
+          },
+          "sport": {
+            "example": "running",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ActivitySport"
+              }
+            ]
+          },
+          "startedAt": {
+            "format": "date-time",
+            "type": "string",
+            "description": "Início da atividade (UTC, ISO 8601).",
+            "example": "2026-09-20T07:15:30.000Z"
+          },
+          "elapsedTimeSeconds": {
+            "type": "integer",
+            "description": "Tempo total em segundos, pausas incluídas.",
+            "example": 3125
+          },
+          "movingTimeSeconds": {
+            "type": "integer",
+            "description": "Tempo em movimento, em segundos.",
+            "example": 3010,
+            "nullable": true
+          },
+          "distanceMeters": {
+            "type": "number",
+            "example": 10012.4,
+            "nullable": true
+          },
+          "elevationGainMeters": {
+            "type": "number",
+            "example": 87.2,
+            "nullable": true
+          },
+          "averageHeartRateBpm": {
+            "type": "integer",
+            "example": 152,
+            "nullable": true
+          },
+          "maxHeartRateBpm": {
+            "type": "integer",
+            "example": 178,
+            "nullable": true
+          },
+          "calories": {
+            "type": "integer",
+            "description": "Quilocalorias (kcal).",
+            "example": 689,
+            "nullable": true
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string",
+            "description": "Quando a atividade foi registrada no Dutrail.",
+            "example": "2026-09-20T08:30:02.114Z"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string",
+            "example": "2026-09-20T08:30:02.114Z"
+          }
+        },
+        "required": [
+          "id",
+          "userId",
+          "name",
+          "sport",
+          "startedAt",
+          "elapsedTimeSeconds",
+          "movingTimeSeconds",
+          "distanceMeters",
+          "elevationGainMeters",
+          "averageHeartRateBpm",
+          "maxHeartRateBpm",
+          "calories",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "ActivityPageDto": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActivityResponseDto"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "description": "Cursor para a próxima página (`?cursor=`). `null` quando não há mais itens.",
+            "example": "WyIyMDI2LTA5LTIwVDA3OjE1OjMwLjAwMFoiLCJjN2EzZDJmNCJd",
+            "nullable": true
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor"
+        ]
+      }
+    }
+  }
+}

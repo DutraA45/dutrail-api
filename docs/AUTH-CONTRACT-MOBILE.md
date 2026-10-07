@@ -42,9 +42,11 @@ faz parte deste documento (ver [Pendências do contrato](#pendências-do-contrat
 
 **Swagger.** `/docs` (UI) e `/docs-json` (OpenAPI) existem só com `NODE_ENV`
 diferente de `production`. Em produção respondem 404, e a referência é este
-documento. O OpenAPI gerado hoje tem divergências de tipo (por exemplo,
-`user.name` e `user.avatarUrl` aparecem como `object`; o certo é
-`String?`). Se gerar classes a partir dele, confira-as contra este documento.
+documento. Há um snapshot versionado do OpenAPI em
+[`openapi.json`](openapi.json) (data e comando para regenerar na nota do topo
+de [`API-CONTRACT.md`](API-CONTRACT.md)). Os tipos dele batem com este
+documento: `user.name` e `user.avatarUrl` são `string` anulável e sempre
+presentes (`String?` em Kotlin), e os inteiros vêm como `integer`.
 
 ## `X-Client-Type`
 
@@ -430,7 +432,7 @@ expirado ou emitido por outro servidor.
 | ------ | ---------------------------------------------------------------------------------------------------------------------------- |
 | 400    | Erro do app. Em formulário, mostre uma mensagem própria. Em `X-Client-Type` ou cookie, é bug do cliente HTTP                 |
 | 401    | Em rota com Bearer: refresh e repete uma vez. Em `/auth/refresh`: sessão encerrada. Em `/auth/login`: credenciais inválidas |
-| 404    | Em `/me`: usuário apagado; limpe a sessão local                                                                              |
+| 404    | `User not found` em `/me` ou em `POST /activities/import`: usuário apagado, sessão encerrada. Limpe a sessão local e vá para o login; não mostre uma mensagem genérica de "não encontrado" |
 | 409    | No cadastro: "email já em uso", para as duas mensagens                                                                       |
 | 429    | "Muitas tentativas, aguarde" (com o `Retry-After`). Não refaça a ação automaticamente. Não encerra a sessão                   |
 | 5xx    | Erro do servidor. Não encerra a sessão; tente de novo mais tarde                                                             |
