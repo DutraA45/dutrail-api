@@ -1,0 +1,937 @@
+import { Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import request from 'supertest';
+import { TokenService } from '../src/auth/token.service.js';
+import {
+  exchangeCodeOf,
+  fakeGoogle,
+  googleCallback,
+  makeGoogleProfile,
+} from './fakes/fake-google.strategy.js';
+import {
+  CLIENT_TYPES,
+  createClient,
+  expectMaxAgeMatchesToken,
+  sentCookies,
+  setCookie,
+  setCookieRaw,
+  type TestClient,
+} from './utils/client.js';
+import { createTestApp, TestApp } from './utils/create-app.js';
+import { claimsOf, signWithSecretOf } from './utils/jwt.js';
+
+const credentials = {
+  email: 'ana@example.com',
+  password: 'S3nh@Forte!',
+  name: 'Ana',
+};
+const loginBody = { email: credentials.email, password: credentials.password };
+
+/**
+ * Cenários que dependem do transporte do refresh token rodam para os DOIS
+ * tipos de cliente. A lógica de negócio (rotação, reuso, revogação) é a mesma;
+ * só muda por onde o token entra e sai.
+ */
+describe.each(CLIENT_TYPES)(
+  'Auth via X-Client-Type: %s (e2e)',
+  (clientType) => {
+    let t: TestApp;
+    let c: TestClient;
+
+    beforeAll(async () => {
+      t = await createTestApp();
+    });
+
+    beforeEach(async () => {
+      await t.resetDb();
+      fakeGoogle.reset();
+      // Cliente novo a cada teste: cookie jar limpo, como um browser recém-aberto.
+      c = createClient(t.app, clientType);
+    });
+
+    afterAll(async () => {
+      await t.close();
+    });
+
+    async function signup(body: Record<string, unknown> = credentials) {
+      const res = await c.post('/api/auth/signup').send(body).expect(201);
+      return res;
+    }
+
+    const rowOf = (token: string) =>
+      t.prisma.refreshToken.findUniqueOrThrow({
+        where: { tokenHash: TokenService.hashToken(token) },
+      });
+
+    describe('POST /api/auth/signup', () => {
+      it('cria o usuário e entrega o refresh token apenas pelo canal do cliente', async () => {
+        const res = await signup();
+
+        expect(res.body.accessToken).toBeTypeOf('string');
+        expect(res.body.user).toMatchObject({
+          email: 'ana@example.com',
+          hasPassword: true,
+        });
+        c.expectTokenChannel(res);
+        expect(JSON.stringify(res.body)).not.toMatch(
+          /password|Hash|S3nh@Forte/,
+        );
+      });
+
+      it('o refresh token entregue funciona', async () => {
+        const res = await signup();
+        const token = c.refreshTokenOf(res)!;
+
+        await c.refresh(token).expect(200);
+      });
+    });
+
+    describe('POST /api/auth/login', () => {
+      beforeEach(() => signup());
+
+      it('entrega o refresh token apenas pelo canal do cliente', async () => {
+        const res = await c.post('/api/auth/login').send(loginBody).expect(200);
+
+        expect(res.body.user.email).toBe('ana@example.com');
+        c.expectTokenChannel(res);
+      });
+
+      it('mantém o 401 genérico para credenciais erradas', async () => {
+        const res = await c
+          .post('/api/auth/login')
+          .send({ email: credentials.email, password: 'errada123' })
+          .expect(401);
+        expect(res.body.message).toBe('Invalid credentials');
+        expect(res.headers['set-cookie']).toBeUndefined();
+      });
+    });
+
+    describe('POST /api/auth/refresh', () => {
+      it('rotaciona: emite par novo, invalida o antigo e não devolve o usuário', async () => {
+        const first = await signup();
+        const firstToken = c.refreshTokenOf(first)!;
+
+        const res = await c.refresh(firstToken).expect(200);
+
+        expect(res.body.accessToken).toBeTypeOf('string');
+        expect(res.body.user).toBeUndefined();
+        c.expectTokenChannel(res);
+        expect(c.refreshTokenOf(res)).not.toBe(firstToken);
+
+        // O access token novo funciona...
+        await c
+          .get('/api/me')
+          .set('Authorization', `Bearer ${res.body.accessToken}`)
+          .expect(200);
+        // ...e o refresh token antigo fica rotacionado, na mesma família,
+        // apontando para o sucessor. Reapresentá-lo agora cairia na janela de
+        // tolerância (test/refresh-token-families.e2e-spec.ts).
+        const old = await rowOf(firstToken);
+        const next = await rowOf(c.refreshTokenOf(res)!);
+        expect(old).toMatchObject({
+          familyId: next.familyId,
+          successorId: next.id,
+          revokedAt: expect.any(Date),
+          rotatedAt: expect.any(Date),
+          graceUsedAt: null,
+        });
+        expect(next).toMatchObject({
+          revokedAt: null,
+          rotatedAt: null,
+          successorId: null,
+        });
+      });
+
+      it('reuso de token rotacionado derruba só a sessão daquele dispositivo (família)', async () => {
+        const first = await signup();
+        const firstToken = c.refreshTokenOf(first)!;
+        // Outro dispositivo do mesmo usuário: outra família.
+        const other = createClient(t.app, clientType);
+        const otherLogin = await other
+          .post('/api/auth/login')
+          .send(loginBody)
+          .expect(200);
+        const second = await c.refreshWith(firstToken).expect(200);
+        const third = await c
+          .refreshWith(c.refreshTokenOf(second)!)
+          .expect(200);
+        const familyId = (await rowOf(firstToken)).familyId;
+
+        // O sucessor já rotacionou de novo: o token antigo só pode ser uma
+        // cópia. Mesma mensagem de qualquer token recusado: quem
+        // reapresenta um token roubado não fica sabendo do reuso.
+        const reuse = await c.refreshWith(firstToken).expect(401);
+        expect(reuse.body.message).toBe('Invalid refresh token');
+
+        await c.refreshWith(c.refreshTokenOf(third)!).expect(401);
+        expect(await t.prisma.refreshToken.count({ where: { familyId } })).toBe(
+          0,
+        );
+        await other.refreshWith(other.refreshTokenOf(otherLogin)!).expect(200);
+      });
+
+      it('401 quando o token não vem no canal do cliente', async () => {
+        await signup();
+        // web: sem cookie (jar vazio). mobile: sem refreshToken no corpo.
+        const res = await request(t.app.getHttpServer())
+          .post('/api/auth/refresh')
+          .set('X-Client-Type', clientType)
+          .expect(401);
+        expect(res.body.message).toBe('Missing refresh token');
+      });
+    });
+
+    describe('POST /api/auth/logout', () => {
+      it('revoga a sessão e o token deixa de funcionar', async () => {
+        const res = await signup();
+        const token = c.refreshTokenOf(res)!;
+
+        await c.logout(token).expect(204);
+        await c.refreshWith(token).expect(401);
+      });
+
+      it('é idempotente', async () => {
+        const res = await signup();
+        const token = c.refreshTokenOf(res)!;
+
+        await c.logout(token).expect(204);
+        await c.logout(token).expect(204);
+      });
+
+      it('não afeta as outras sessões do usuário', async () => {
+        await signup();
+        const a = await c.post('/api/auth/login').send(loginBody).expect(200);
+        const aToken = c.refreshTokenOf(a)!;
+        // Segunda sessão: outro cliente (outro cookie jar / outro token).
+        const other = createClient(t.app, clientType);
+        const b = await other
+          .post('/api/auth/login')
+          .send(loginBody)
+          .expect(200);
+        const bToken = other.refreshTokenOf(b)!;
+
+        await c.logout(aToken).expect(204);
+        await c.refreshWith(aToken).expect(401);
+        await other.refreshWith(bToken).expect(200);
+      });
+    });
+
+    describe('Google OAuth (strategy mockada)', () => {
+      it('troca o código por tokens no canal do cliente', async () => {
+        fakeGoogle.profile = makeGoogleProfile({});
+        const callback = await googleCallback(t.app.getHttpServer());
+        expect(callback.status).toBe(302);
+        const code = exchangeCodeOf(callback.headers.location);
+        // O redirect do Google nunca carrega token, em nenhum dos fluxos: o
+        // único cookie é o de state sendo apagado.
+        expect(callback.headers.location).not.toMatch(/token/i);
+        expect(setCookie(callback)).toBeUndefined();
+        expect(callback.headers['set-cookie']).toEqual([
+          expect.stringMatching(/^googleOAuthState=;/),
+        ]);
+
+        const res = await c
+          .post('/api/auth/google/exchange')
+          .send({ code })
+          .expect(200);
+
+        expect(res.body.user).toMatchObject({
+          email: 'google@example.com',
+          hasPassword: false,
+        });
+        c.expectTokenChannel(res);
+        await c.refresh(c.refreshTokenOf(res)!).expect(200);
+      });
+    });
+
+    describe('X-Client-Type', () => {
+      it.each([
+        ['/api/auth/signup', credentials],
+        ['/api/auth/login', loginBody],
+        ['/api/auth/refresh', {}],
+        ['/api/auth/logout', {}],
+        ['/api/auth/google/exchange', { code: 'a'.repeat(43) }],
+      ])('400 em %s sem o header', async (url, body) => {
+        const res = await request(t.app.getHttpServer())
+          .post(url)
+          .send(body)
+          .expect(400);
+        expect(res.body.message).toContain('x-client-type');
+      });
+
+      it('400 com valor inválido', async () => {
+        const res = await request(t.app.getHttpServer())
+          .post('/api/auth/login')
+          .set('X-Client-Type', 'desktop')
+          .send(loginBody)
+          .expect(400);
+        expect(res.body.message).toContain('must be one of');
+      });
+    });
+  },
+);
+
+describe('Transporte do refresh token: regras de canal (e2e)', () => {
+  let t: TestApp;
+
+  beforeAll(async () => {
+    t = await createTestApp();
+  });
+
+  beforeEach(() => t.resetDb());
+
+  afterAll(async () => {
+    await t.close();
+  });
+
+  const http = () => request(t.app.getHttpServer());
+
+  async function signupAs(clientType: 'web' | 'mobile') {
+    return http()
+      .post('/api/auth/signup')
+      .set('X-Client-Type', clientType)
+      .send(credentials)
+      .expect(201);
+  }
+
+  it('web: cookie com HttpOnly, Path=/api/auth, SameSite=Lax e Max-Age do token emitido', async () => {
+    const res = await signupAs('web');
+    const cookie = setCookieRaw(res)!;
+
+    expect(cookie).toContain('HttpOnly');
+    expect(cookie).toContain('Path=/api/auth');
+    expect(cookie).toMatch(/SameSite=Lax/i);
+    // JWT_REFRESH_TTL=7d no .env.test.
+    expectMaxAgeMatchesToken(res, 7 * 24 * 60 * 60);
+    // O .env.test desliga o Secure (COOKIE_SECURE=false): o cookie jar do
+    // supertest não reenviaria um cookie Secure em http://. O padrão (Secure
+    // ligado) é coberto em refresh-cookie-by-env.e2e-spec.ts.
+    expect(cookie).not.toMatch(/;\s*Secure/i);
+  });
+
+  it('web: 400 se o refresh token vier no corpo (canal errado)', async () => {
+    const signup = await signupAs('web');
+    const token = setCookie(signup)!;
+
+    const res = await http()
+      .post('/api/auth/refresh')
+      .set('X-Client-Type', 'web')
+      .set('Cookie', `refreshToken=${token}`)
+      .send({ refreshToken: token })
+      .expect(400);
+    expect(res.body.message).toContain('must not be sent in the request body');
+
+    // A sessão continua intacta: a request foi rejeitada antes da rotação.
+    await http()
+      .post('/api/auth/refresh')
+      .set('X-Client-Type', 'web')
+      .set('Cookie', `refreshToken=${token}`)
+      .expect(200);
+  });
+
+  it('mobile: 400 se um cookie de refresh acompanhar a request', async () => {
+    const signup = await signupAs('mobile');
+    const token = signup.body.refreshToken as string;
+
+    const res = await http()
+      .post('/api/auth/refresh')
+      .set('X-Client-Type', 'mobile')
+      .set('Cookie', `refreshToken=${token}`)
+      .send({ refreshToken: token })
+      .expect(400);
+    expect(res.body.message).toContain('must not be sent when');
+  });
+
+  it('web: logout limpa o cookie com as mesmas opções do set', async () => {
+    const signup = await signupAs('web');
+    const token = setCookie(signup)!;
+
+    const res = await http()
+      .post('/api/auth/logout')
+      .set('X-Client-Type', 'web')
+      .set('Cookie', `refreshToken=${token}`)
+      .expect(204);
+
+    const cleared = setCookieRaw(res)!;
+    expect(cleared).toMatch(/^refreshToken=;/);
+    expect(cleared).toContain('Path=/api/auth');
+    expect(cleared).toContain('HttpOnly');
+    expect(cleared).toMatch(/SameSite=Lax/i);
+    expect(cleared).not.toMatch(/;\s*Secure/i); // igual ao set (COOKIE_SECURE=false)
+    expect(cleared).toContain('Expires=Thu, 01 Jan 1970');
+  });
+
+  it('web: logout sem cookie é 204 (sessão já encerrada), e ainda limpa o cookie', async () => {
+    const res = await http()
+      .post('/api/auth/logout')
+      .set('X-Client-Type', 'web')
+      .expect(204);
+    expect(setCookieRaw(res)).toMatch(/^refreshToken=;/);
+  });
+
+  it('mobile: nenhuma rota emite Set-Cookie', async () => {
+    const signup = await signupAs('mobile');
+    expect(signup.headers['set-cookie']).toBeUndefined();
+
+    const refresh = await http()
+      .post('/api/auth/refresh')
+      .set('X-Client-Type', 'mobile')
+      .send({ refreshToken: signup.body.refreshToken })
+      .expect(200);
+    expect(refresh.headers['set-cookie']).toBeUndefined();
+
+    const logout = await http()
+      .post('/api/auth/logout')
+      .set('X-Client-Type', 'mobile')
+      .send({ refreshToken: refresh.body.refreshToken })
+      .expect(204);
+    expect(logout.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('o cookie do fluxo web não acompanha requests fora de /api/auth', async () => {
+    // Path=/api/auth: o browser não manda o refresh token para as rotas de negócio.
+    const agent = request.agent(t.app.getHttpServer());
+    const signup = await agent
+      .post('/api/auth/signup')
+      .set('X-Client-Type', 'web')
+      .send(credentials)
+      .expect(201);
+
+    const me = await agent
+      .get('/api/me')
+      .set('Authorization', `Bearer ${signup.body.accessToken}`)
+      .expect(200);
+    expect(sentCookies(me)).toBe('');
+
+    // Já em /api/auth/refresh o mesmo jar envia o cookie.
+    const refresh = await agent
+      .post('/api/auth/refresh')
+      .set('X-Client-Type', 'web')
+      .expect(200);
+    expect(sentCookies(refresh)).toContain('refreshToken=');
+  });
+
+  it('CORS: preflight permite credenciais, a origem do frontend e o header X-Client-Type', async () => {
+    // Sem isso o browser nem envia a request real do fluxo web: o cookie exige
+    // Allow-Credentials, e o header customizado exige estar em Allow-Headers.
+    const res = await http()
+      .options('/api/auth/refresh')
+      .set('Origin', 'http://localhost:4200')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'x-client-type,content-type')
+      .expect(204);
+
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://localhost:4200',
+    );
+    expect(res.headers['access-control-allow-credentials']).toBe('true');
+    expect(
+      res.headers['access-control-allow-headers']?.toLowerCase(),
+    ).toContain('x-client-type');
+  });
+
+  it('CORS: nunca reflete uma origem arbitrária de volta', async () => {
+    const res = await http()
+      .options('/api/auth/refresh')
+      .set('Origin', 'https://atacante.example')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'x-client-type');
+
+    // Só as origens de CORS_ORIGINS recebem resposta de CORS; sem
+    // Access-Control-Allow-Origin, o browser bloqueia a resposta do atacante.
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    expect(res.headers['access-control-allow-credentials']).toBeUndefined();
+  });
+
+  it('web e mobile compartilham a mesma sessão no banco (só o canal difere)', async () => {
+    await signupAs('web');
+    expect(await t.prisma.refreshToken.count()).toBe(1);
+
+    const row = await t.prisma.refreshToken.findFirstOrThrow();
+    // O banco guarda apenas o hash, igual para os dois transportes.
+    expect(row.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(row.revokedAt).toBeNull();
+  });
+});
+
+describe('Rotas independentes do client type (e2e)', () => {
+  let t: TestApp;
+
+  beforeAll(async () => {
+    t = await createTestApp();
+  });
+
+  beforeEach(async () => {
+    await t.resetDb();
+    fakeGoogle.reset();
+  });
+
+  afterAll(async () => {
+    await t.close();
+  });
+
+  const http = () => request(t.app.getHttpServer());
+  const mobile = () => createClient(t.app, 'mobile');
+
+  it('GET /api/auth/google redireciona sem exigir o header', async () => {
+    const res = await http().get('/api/auth/google').expect(302);
+    expect(res.headers.location).toContain('accounts.google.com');
+  });
+
+  it('GET /api/me não exige X-Client-Type', async () => {
+    const c = mobile();
+    const signup = await c
+      .post('/api/auth/signup')
+      .send(credentials)
+      .expect(201);
+
+    const res = await http()
+      .get('/api/me')
+      .set('Authorization', `Bearer ${signup.body.accessToken}`)
+      .expect(200);
+    expect(res.body).toMatchObject({
+      email: 'ana@example.com',
+      hasPassword: true,
+    });
+    expect(res.body).not.toHaveProperty('passwordHash');
+  });
+
+  it.each([
+    ['sem token', undefined],
+    ['token adulterado', 'a.b.c'],
+  ])('GET /api/me retorna 401 %s', async (_label, token) => {
+    const req = http().get('/api/me');
+    if (token) req.set('Authorization', `Bearer ${token}`);
+    await req.expect(401);
+  });
+
+  it('GET /api/me retorna 401 com refresh token no lugar do access token', async () => {
+    const c = mobile();
+    const signup = await c
+      .post('/api/auth/signup')
+      .send(credentials)
+      .expect(201);
+    await http()
+      .get('/api/me')
+      .set('Authorization', `Bearer ${signup.body.refreshToken}`)
+      .expect(401);
+  });
+
+  describe('claims do JWT', () => {
+    async function signupUserId(): Promise<string> {
+      const res = await mobile()
+        .post('/api/auth/signup')
+        .send(credentials)
+        .expect(201);
+      return res.body.user.id as string;
+    }
+
+    const bearer = (token: string) =>
+      http().get('/api/me').set('Authorization', `Bearer ${token}`);
+
+    it.each([
+      ['aud de refresh token', claimsOf('refresh')],
+      ['outro emissor', { ...claimsOf('access'), issuer: 'outro-servico' }],
+      ['sem iss nem aud (formato antigo)', {}],
+    ])(
+      'GET /api/me recusa access token com o segredo certo mas %s',
+      async (_label, claims) => {
+        const payload = { sub: await signupUserId(), email: credentials.email };
+
+        // Controle: o mesmo payload com as claims atuais é aceito, então o
+        // 401 abaixo vem da claim, e não de um token mal forjado.
+        await bearer(
+          signWithSecretOf('access', payload, claimsOf('access')),
+        ).expect(200);
+        await bearer(signWithSecretOf('access', payload, claims)).expect(401);
+      },
+    );
+
+    /**
+     * O token forjado é gravado no banco como se a API o tivesse emitido:
+     * sem isso o 401 viria do "não encontrado", e o teste passaria mesmo sem
+     * a checagem das claims.
+     */
+    async function storedRefreshToken(
+      userId: string,
+      options: Parameters<typeof signWithSecretOf>[2],
+    ): Promise<string> {
+      const token = signWithSecretOf(
+        'refresh',
+        { sub: userId, jti: randomUUID() },
+        options,
+      );
+      await t.prisma.refreshToken.create({
+        data: {
+          tokenHash: TokenService.hashToken(token),
+          userId,
+          familyId: randomUUID(),
+          expiresAt: new Date(Date.now() + 86_400_000),
+        },
+      });
+      return token;
+    }
+
+    it.each([
+      ['aud de access token', claimsOf('access')],
+      [
+        'assinatura HS384',
+        { ...claimsOf('refresh'), algorithm: 'HS384' as const },
+      ],
+      ['sem iss nem aud (formato antigo)', {}],
+    ])(
+      'POST /api/auth/refresh recusa token com o segredo de refresh mas %s',
+      async (_label, options) => {
+        const userId = await signupUserId();
+        const c = mobile();
+
+        // Controle: token forjado com as claims atuais e gravado é aceito.
+        const valid = await storedRefreshToken(userId, claimsOf('refresh'));
+        await c.refreshWith(valid).expect(200);
+
+        const token = await storedRefreshToken(userId, options);
+        const res = await c.refreshWith(token).expect(401);
+        expect(res.body.message).toBe('Invalid refresh token');
+        // Recusado já na verificação do JWT: continua gravado e não revogado.
+        expect(
+          await t.prisma.refreshToken.findUnique({
+            where: { tokenHash: TokenService.hashToken(token) },
+          }),
+        ).toMatchObject({ revokedAt: null });
+      },
+    );
+  });
+
+  it('retorna 409 para email já cadastrado', async () => {
+    const c = mobile();
+    await c.post('/api/auth/signup').send(credentials).expect(201);
+    const res = await c.post('/api/auth/signup').send(credentials).expect(409);
+    expect(res.body).toEqual({
+      statusCode: 409,
+      error: 'Conflict',
+      message: 'Email already registered',
+      path: '/api/auth/signup',
+      timestamp: expect.any(String),
+    });
+  });
+
+  it('retorna 400 com a lista de erros de validação', async () => {
+    const res = await mobile()
+      .post('/api/auth/signup')
+      .send({ email: 'nao-e-email', password: '123', isAdmin: true })
+      .expect(400);
+    expect(res.body.message).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('email must be an email'),
+        expect.stringContaining('password must be longer'),
+        expect.stringContaining('isAdmin should not exist'),
+      ]),
+    );
+  });
+
+  it('rejeita refresh token que não é JWT e código de troca com tamanho errado', async () => {
+    const c = mobile();
+    await c
+      .post('/api/auth/refresh')
+      .send({ refreshToken: 'nao-e-jwt' })
+      .expect(400);
+    await c
+      .post('/api/auth/google/exchange')
+      .send({ code: 'curto' })
+      .expect(400);
+  });
+
+  /** Callback do Google (strategy falsa) + troca do código pelo cliente. */
+  async function loginWithGoogle(
+    c: TestClient,
+    profile: Parameters<typeof makeGoogleProfile>[0],
+  ) {
+    fakeGoogle.profile = makeGoogleProfile(profile);
+    const callback = await googleCallback(t.app.getHttpServer());
+    expect(callback.status).toBe(302);
+    const code = exchangeCodeOf(callback.headers.location);
+    return c.post('/api/auth/google/exchange').send({ code }).expect(200);
+  }
+
+  it('vincula a conta Google a um usuário existente com o mesmo email', async () => {
+    const c = mobile();
+    await c.post('/api/auth/signup').send(credentials).expect(201);
+
+    const res = await loginWithGoogle(c, {
+      email: 'Ana@Example.com',
+      id: 'google-id-ana',
+    });
+
+    // O signup não verifica o email, então a senha cadastrada é descartada
+    // na vinculação: a conta vira só-Google.
+    expect(res.body.user).toMatchObject({
+      email: 'ana@example.com',
+      name: 'Ana',
+      emailVerified: true,
+      hasPassword: false,
+    });
+    expect(await t.prisma.user.count()).toBe(1);
+  });
+
+  it('pre-hijacking: quem cadastrou o email antes perde senha e sessões quando o dono entra com Google', async () => {
+    // Atacante cadastra o email da vítima com uma senha própria.
+    const attacker = mobile();
+    const signup = await attacker
+      .post('/api/auth/signup')
+      .send(credentials)
+      .expect(201);
+    const signupToken = attacker.refreshTokenOf(signup)!;
+    const login = await attacker
+      .post('/api/auth/login')
+      .send(loginBody)
+      .expect(200);
+    const loginToken = attacker.refreshTokenOf(login)!;
+    const userId = signup.body.user.id as string;
+
+    // Código de troca pendente de antes da vinculação: também deve cair.
+    await t.prisma.oAuthExchangeCode.create({
+      data: {
+        codeHash: 'f'.repeat(64),
+        userId,
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+
+    // A dona real do email entra com Google (email verificado).
+    const victim = mobile();
+    const linked = await loginWithGoogle(victim, {
+      email: credentials.email,
+      id: 'google-id-ana',
+    });
+    expect(linked.body.user).toMatchObject({
+      id: userId,
+      emailVerified: true,
+      hasPassword: false,
+    });
+
+    // A senha do atacante não vale mais...
+    const denied = await attacker
+      .post('/api/auth/login')
+      .send(loginBody)
+      .expect(401);
+    expect(denied.body.message).toBe('Invalid credentials');
+
+    // ...nem os refresh tokens emitidos antes da vinculação. São "não
+    // encontrados", não "reuso": o atacante não consegue derrubar as sessões
+    // da vítima reapresentando-os.
+    for (const token of [signupToken, loginToken]) {
+      const res = await attacker.refreshWith(token).expect(401);
+      expect(res.body.message).toBe('Invalid refresh token');
+    }
+    expect(
+      await t.prisma.oAuthExchangeCode.count({
+        where: { codeHash: 'f'.repeat(64) },
+      }),
+    ).toBe(0);
+
+    // A sessão da vítima segue válida, e ela volta a entrar com Google.
+    await victim.refresh(victim.refreshTokenOf(linked)!).expect(200);
+    const again = await loginWithGoogle(mobile(), {
+      email: credentials.email,
+      id: 'google-id-ana',
+    });
+    expect(again.body.user).toMatchObject({ id: userId, hasPassword: false });
+    expect(await t.prisma.user.count()).toBe(1);
+  });
+
+  it('vincular conta com email já verificado mantém a senha e as sessões', async () => {
+    const c = mobile();
+    const signup = await c
+      .post('/api/auth/signup')
+      .send(credentials)
+      .expect(201);
+    const signupToken = c.refreshTokenOf(signup)!;
+    // Marca o email como verificado direto no banco.
+    await t.prisma.user.update({
+      where: { email: credentials.email },
+      data: { emailVerified: true },
+    });
+
+    const res = await loginWithGoogle(mobile(), {
+      email: credentials.email,
+      id: 'google-id-ana',
+    });
+
+    expect(res.body.user).toMatchObject({
+      email: 'ana@example.com',
+      emailVerified: true,
+      hasPassword: true,
+    });
+    await c.post('/api/auth/login').send(loginBody).expect(200);
+    await c.refreshWith(signupToken).expect(200);
+  });
+
+  it('recusa vincular quando o Google não verificou o email', async () => {
+    const c = mobile();
+    await c.post('/api/auth/signup').send(credentials).expect(201);
+    fakeGoogle.profile = makeGoogleProfile({
+      email: 'ana@example.com',
+      verified: false,
+    });
+
+    // A regra de negócio é a mesma; só o desfecho virou redirect.
+    const res = await googleCallback(t.app.getHttpServer());
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(
+      'http://localhost:4200/auth/callback?error=email_not_verified',
+    );
+
+    const stored = await t.prisma.user.findUnique({
+      where: { email: 'ana@example.com' },
+    });
+    expect(stored?.googleId).toBeNull();
+  });
+
+  it('rejeita código de troca já usado ou expirado', async () => {
+    const c = mobile();
+    fakeGoogle.profile = makeGoogleProfile({});
+    const callback = await googleCallback(t.app.getHttpServer());
+    const code = exchangeCodeOf(callback.headers.location);
+
+    await c.post('/api/auth/google/exchange').send({ code }).expect(200);
+    await c.post('/api/auth/google/exchange').send({ code }).expect(401);
+
+    fakeGoogle.profile = makeGoogleProfile({
+      email: 'outro@example.com',
+      id: 'g-2',
+    });
+    const second = await googleCallback(t.app.getHttpServer());
+    const expiring = exchangeCodeOf(second.headers.location);
+    await t.prisma.oAuthExchangeCode.updateMany({
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    });
+    await c
+      .post('/api/auth/google/exchange')
+      .send({ code: expiring })
+      .expect(401);
+  });
+
+  it('erro inesperado no callback redireciona (sem 500) e o log do stack não leva a query string', async () => {
+    // Sem perfil configurado, o userinfo falso falha com um Error comum (não
+    // é erro do OAuth): o stack é logado, mas só com o path.
+    const logError = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    try {
+      const res = await googleCallback(t.app.getHttpServer());
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe(
+        'http://localhost:4200/auth/callback?error=oauth_failed',
+      );
+      const [{ code }] = fakeGoogle.tokenRequests;
+
+      expect(logError).toHaveBeenCalledTimes(1);
+      const logged = JSON.stringify(logError.mock.calls);
+      expect(logged).toContain('GET /api/auth/google/callback -> oauth_failed');
+      expect(logged).not.toContain(code);
+      expect(logged).not.toContain('state=');
+    } finally {
+      logError.mockRestore();
+    }
+  });
+
+  describe('Swagger', () => {
+    it('documenta o header, os dois formatos de corpo e os erros', async () => {
+      await http().get('/api/docs').expect(200);
+      const res = await http().get('/api/docs-json').expect(200);
+
+      expect(Object.keys(res.body.paths)).toEqual(
+        expect.arrayContaining([
+          '/api/auth/signup',
+          '/api/auth/login',
+          '/api/auth/refresh',
+          '/api/auth/logout',
+          '/api/auth/google',
+          '/api/auth/google/exchange',
+          '/api/me',
+        ]),
+      );
+      expect(res.body.paths['/api/me'].get.security).toEqual([{ bearer: [] }]);
+
+      // X-Client-Type documentado como header obrigatório nas rotas de token.
+      const loginHeaders = res.body.paths['/api/auth/login'].post.parameters;
+      expect(loginHeaders).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: 'X-Client-Type',
+            in: 'header',
+            required: true,
+          }),
+        ]),
+      );
+
+      // O corpo varia por cliente: oneOf com os dois formatos.
+      const loginSchema =
+        res.body.paths['/api/auth/login'].post.responses['200'].content[
+          'application/json'
+        ].schema;
+      expect(loginSchema.oneOf).toEqual([
+        { $ref: '#/components/schemas/AuthWebResponseDto' },
+        { $ref: '#/components/schemas/AuthMobileResponseDto' },
+      ]);
+      const refreshSchema =
+        res.body.paths['/api/auth/refresh'].post.responses['200'].content[
+          'application/json'
+        ].schema;
+      expect(refreshSchema.oneOf).toEqual([
+        { $ref: '#/components/schemas/AccessTokenDto' },
+        { $ref: '#/components/schemas/TokenPairDto' },
+      ]);
+
+      // Só o schema mobile expõe refreshToken.
+      expect(
+        res.body.components.schemas.AuthMobileResponseDto.properties,
+      ).toHaveProperty('refreshToken');
+      expect(
+        res.body.components.schemas.AuthWebResponseDto.properties,
+      ).not.toHaveProperty('refreshToken');
+
+      expect(res.body.paths['/api/auth/login'].post.responses).toHaveProperty(
+        '401',
+      );
+      expect(res.body.paths['/api/auth/login'].post.responses).toHaveProperty(
+        '429',
+      );
+      expect(res.body.paths['/api/auth/refresh'].post.responses).toHaveProperty(
+        '400',
+      );
+    });
+  });
+});
+
+describe('Rate limiting (e2e)', () => {
+  let t: TestApp;
+
+  beforeAll(async () => {
+    t = await createTestApp({ keepThrottling: true });
+    await t.resetDb();
+  });
+
+  afterAll(async () => {
+    await t.close();
+  });
+
+  it('bloqueia o login com 429 após 10 tentativas por minuto', async () => {
+    // Um email por tentativa: o limite aqui é o por IP, não o por conta.
+    const post = (i: number) =>
+      request(t.app.getHttpServer())
+        .post('/api/auth/login')
+        .set('X-Client-Type', 'mobile')
+        .send({ email: `x${i}@example.com`, password: 'qualquer1' });
+
+    for (let i = 0; i < 10; i++) {
+      await post(i).expect(401);
+    }
+    const res = await post(10).expect(429);
+    expect(res.body).toMatchObject({
+      statusCode: 429,
+      path: '/api/auth/login',
+    });
+    expect(res.body.message).toMatch(/too many requests/i);
+  });
+});

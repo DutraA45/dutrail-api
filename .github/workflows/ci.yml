@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Lint, build e testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Mesmo Postgres do compose.yaml: usuário e senha de teste, porta 5433.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: dutrail
+          POSTGRES_PASSWORD: dutrail
+          POSTGRES_DB: dutrail
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U dutrail"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      # Valor do .env.test (sem segredo real); os e2e só aceitam banco com "test".
+      DATABASE_URL: postgresql://dutrail:dutrail@localhost:5433/dutrail_test
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Gerar o Prisma Client
+        run: npm run prisma:generate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Formatação
+        run: npx prettier --check "src/**/*.ts" "test/**/*.ts"
+
+      - name: Build
+        run: npm run build
+
+      - name: Testes unitários
+        run: npm test
+
+      - name: Criar o banco de teste (scripts/init-test-db.sql)
+        run: docker exec -i ${{ job.services.postgres.id }} psql -U dutrail -d dutrail -v ON_ERROR_STOP=1 < scripts/init-test-db.sql
+
+      - name: Testes e2e
+        run: npm run test:e2e
+
+      - name: Vulnerabilidades nas dependências de produção (npm audit)
+        run: npm run audit:prod

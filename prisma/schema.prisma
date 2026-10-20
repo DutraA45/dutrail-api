@@ -1,0 +1,129 @@
+// Schema do Prisma para o Dutrail.
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  // Novo gerador (Prisma 7+): emite TypeScript puro dentro de src/, que é
+  // compilado junto com o resto da aplicação pelo `nest build`.
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  // A URL fica em prisma7.config.ts (lida de DATABASE_URL), não aqui.
+}
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  // Nulo para contas criadas via OAuth (Google) que nunca definiram senha.
+  passwordHash  String?
+  name          String?
+  avatarUrl     String?
+  // Preenchido quando a conta foi criada pelo Google ou vinculada a ele.
+  googleId      String?  @unique
+  emailVerified Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  refreshTokens      RefreshToken[]
+  oauthExchangeCodes OAuthExchangeCode[]
+  activities         Activity[]
+}
+
+/// Uma linha por refresh token emitido. Guardamos apenas o SHA-256 do token:
+/// um vazamento do banco não permite forjar sessões.
+///
+/// Estados: ativo (`revokedAt` nulo), rotacionado (`revokedAt` e `rotatedAt`
+/// preenchidos; só serve à janela de tolerância ou para detectar reuso) e
+/// inexistente (apagado por logout, por vínculo com o Google de conta não
+/// verificada ou por detecção de reuso).
+model RefreshToken {
+  id          String    @id @default(uuid())
+  tokenHash   String    @unique
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Família = a sessão de um dispositivo: nasce no login/signup/troca do
+  // Google e é herdada na rotação. O reuso derruba só a família.
+  familyId    String    @db.Uuid
+  expiresAt   DateTime
+  // Preenchido na rotação, junto com `rotatedAt`. Linhas anteriores à
+  // migration de famílias podem ter só `revokedAt`.
+  revokedAt   DateTime?
+  rotatedAt   DateTime?
+  // Id do token emitido na rotação. Sem FK de propósito: um id que não existe
+  // mais significa "sucessor apagado" (logout), e reapresentar o token antigo
+  // vira um 401 simples, sem efeito colateral.
+  successorId String?
+  // Uso único da janela de tolerância (REFRESH_GRACE_SECONDS).
+  graceUsedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+  @@index([familyId])
+}
+
+/// Código de uso único gerado no callback do Google. O frontend troca esse
+/// código por um par de tokens em POST /auth/google/exchange, evitando que
+/// tokens trafeguem na URL do redirect.
+model OAuthExchangeCode {
+  id        String    @id @default(uuid())
+  codeHash  String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+}
+
+/// Modalidade da atividade. Os valores seguem os nomes do campo `sport` do
+/// protocolo FIT (origem prevista dos dados); o que não tiver equivalente
+/// aqui vira `other`. Novos valores exigem migration (ALTER TYPE ... ADD VALUE).
+enum ActivitySport {
+  running
+  cycling
+  walking
+  hiking
+  swimming
+  other
+}
+
+/// Uma atividade registrada (corrida, pedal...). Criada pela importação de
+/// arquivos .fit (POST /activities/import).
+///
+/// Unidades no nome do campo para não haver dúvida no cliente. As métricas
+/// que dependem de sensor (FC, calorias, altimetria) ficam nulas quando a
+/// origem não tem a informação.
+model Activity {
+  id                  String        @id @default(uuid())
+  userId              String
+  user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                String
+  sport               ActivitySport
+  startedAt           DateTime
+  // Tempo total, pausas incluídas.
+  elapsedTimeSeconds  Int
+  // Tempo em movimento (sem pausas).
+  movingTimeSeconds   Int?
+  distanceMeters      Float?
+  elevationGainMeters Float?
+  averageHeartRateBpm Int?
+  maxHeartRateBpm     Int?
+  // Quilocalorias (kcal), como o `total_calories` do FIT.
+  calories            Int?
+  // Chave do arquivo .fit original no object storage
+  // (`activities/{userId}/{id}.fit`). Nula para atividades que não vieram de
+  // importação. Detalhe interno: não sai na resposta da API.
+  fitFileKey          String?       @unique
+  // Identidade do arquivo importado (file_id do FIT ou SHA-256 do conteúdo),
+  // usada para recusar a reimportação do mesmo arquivo pelo mesmo usuário.
+  fitFingerprint      String?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  // Atende a listagem (WHERE userId ORDER BY startedAt DESC, id DESC) e a
+  // paginação por cursor, sem sort em memória.
+  @@index([userId, startedAt(sort: Desc), id(sort: Desc)])
+  // Postgres trata NULLs como distintos: atividades sem fingerprint não colidem.
+  @@unique([userId, fitFingerprint])
+}

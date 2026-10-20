@@ -1,0 +1,132 @@
+import { Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import {
+  isSwaggerPath,
+  shouldSetupSwagger,
+  warnAboutGoogleConfig,
+  warnAboutTrustProxy,
+} from './app.setup.js';
+import { EnvironmentVariables, NodeEnv } from './config/env.validation.js';
+
+describe('shouldSetupSwagger', () => {
+  it('não registra o Swagger em produção', () => {
+    expect(shouldSetupSwagger(NodeEnv.Production)).toBe(false);
+  });
+
+  it.each([NodeEnv.Development, NodeEnv.Test])(
+    'registra o Swagger em %s',
+    (nodeEnv) => {
+      expect(shouldSetupSwagger(nodeEnv)).toBe(true);
+    },
+  );
+});
+
+describe('isSwaggerPath', () => {
+  it.each([
+    '/api/docs',
+    '/api/docs/',
+    '/api/docs/index.html',
+    '/api/docs/swagger-ui-bundle.js',
+    '/api/docs-json',
+  ])('%s recebe a CSP da Swagger UI', (path) => {
+    expect(isSwaggerPath(path)).toBe(true);
+  });
+
+  it.each([
+    '/',
+    '/api/auth/login',
+    '/api/docsx',
+    '/api/docs-yaml',
+    '/docs',
+    '/docs-json',
+    '/api/documents',
+  ])('%s fica com a CSP da API', (path) => {
+    expect(isSwaggerPath(path)).toBe(false);
+  });
+});
+
+describe('warnAboutGoogleConfig', () => {
+  function configWith(values: Partial<EnvironmentVariables>) {
+    return {
+      get: (name: keyof EnvironmentVariables) => values[name],
+    } as unknown as ConfigService<EnvironmentVariables, true>;
+  }
+  const suspicious = {
+    GOOGLE_CLIENT_ID: 'xxx.apps.googleusercontent.com',
+    GOOGLE_CLIENT_SECRET: 'troque-isto',
+    GOOGLE_CALLBACK_URL: 'http://localhost:3000/callback',
+  };
+
+  it.each([NodeEnv.Development, NodeEnv.Test])(
+    'em %s, um warn por problema, sem os valores e sem lançar',
+    (nodeEnv) => {
+      const warn = vi.fn();
+      expect(() =>
+        warnAboutGoogleConfig(
+          configWith({ NODE_ENV: nodeEnv, ...suspicious }),
+          { warn } as unknown as Logger,
+        ),
+      ).not.toThrow();
+
+      const calls = warn.mock.calls.flat().join('\n');
+      expect(warn).toHaveBeenCalledTimes(3);
+      for (const value of Object.values(suspicious)) {
+        expect(calls).not.toContain(value);
+      }
+    },
+  );
+
+  it('em produção não emite nada', () => {
+    const warn = vi.fn();
+    warnAboutGoogleConfig(
+      configWith({ NODE_ENV: NodeEnv.Production, ...suspicious }),
+      { warn } as unknown as Logger,
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('warnAboutTrustProxy', () => {
+  function configWith(values: Partial<EnvironmentVariables>) {
+    return {
+      get: (name: keyof EnvironmentVariables) => values[name],
+    } as unknown as ConfigService<EnvironmentVariables, true>;
+  }
+
+  it('em produção sem TRUST_PROXY, um warn sobre o IP do proxy, sem lançar', () => {
+    const warn = vi.fn();
+    expect(() =>
+      warnAboutTrustProxy(
+        configWith({ NODE_ENV: NodeEnv.Production, TRUST_PROXY: false }),
+        { warn } as unknown as Logger,
+      ),
+    ).not.toThrow();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/TRUST_PROXY.*IP.*proxy/);
+  });
+
+  it.each([1, ['10.0.0.5']])(
+    'em produção com TRUST_PROXY definido (%j), nada',
+    (value) => {
+      const warn = vi.fn();
+      warnAboutTrustProxy(
+        configWith({ NODE_ENV: NodeEnv.Production, TRUST_PROXY: value }),
+        { warn } as unknown as Logger,
+      );
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([NodeEnv.Development, NodeEnv.Test])(
+    'em %s, nada (sem proxy é o esperado)',
+    (nodeEnv) => {
+      const warn = vi.fn();
+      warnAboutTrustProxy(
+        configWith({ NODE_ENV: nodeEnv, TRUST_PROXY: false }),
+        { warn } as unknown as Logger,
+      );
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
+});
