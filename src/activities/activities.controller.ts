@@ -114,7 +114,13 @@ export class ActivitiesController {
     schema: {
       type: 'object',
       required: ['file'],
-      properties: { file: { type: 'string', format: 'binary' } },
+      properties: {
+        file: {
+          type: 'string',
+          format: 'binary',
+          description: `Arquivo .fit da atividade (um só), até ${FIT_FILE_MAX_BYTES} bytes (10 MiB). Outros campos do formulário são ignorados.`,
+        },
+      },
     },
   })
   @ApiCreatedResponse({ type: ActivityResponseDto })
